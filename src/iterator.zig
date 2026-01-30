@@ -184,11 +184,11 @@ test "RawIterator seek and bounds" {
     const cf = families[0].handle;
     db = db.withDefaultColumnFamily(cf);
 
-    try db.put(null, "a", "1", &err_str);
-    try db.put(null, "b", "2", &err_str);
-    try db.put(null, "c", "3", &err_str);
+    try db.put(null, "a", "1", .{}, &err_str);
+    try db.put(null, "b", "2", .{}, &err_str);
+    try db.put(null, "c", "3", .{}, &err_str);
 
-    var raw = db.rawIterator(null);
+    var raw = db.rawIterator(null, .{});
     defer raw.deinit();
 
     raw.seekToFirst();
@@ -230,7 +230,7 @@ test "Iterator on empty database returns no entries" {
     const cf = families[0].handle;
     db = db.withDefaultColumnFamily(cf);
 
-    var iter = db.iterator(null, .forward, null);
+    var iter = db.iterator(null, .forward, null, .{});
     defer iter.deinit();
 
     const entry = try iter.next(&err_str);
@@ -263,10 +263,10 @@ test "RawIterator seek to non-existent key" {
     const cf = families[0].handle;
     db = db.withDefaultColumnFamily(cf);
 
-    try db.put(null, "a", "1", &err_str);
-    try db.put(null, "c", "3", &err_str);
+    try db.put(null, "a", "1", .{}, &err_str);
+    try db.put(null, "c", "3", .{}, &err_str);
 
-    var raw = db.rawIterator(null);
+    var raw = db.rawIterator(null, .{});
     defer raw.deinit();
 
     // Seek to nonexistent key between existing keys
@@ -307,11 +307,11 @@ test "Iterator reverse direction" {
     const cf = families[0].handle;
     db = db.withDefaultColumnFamily(cf);
 
-    try db.put(null, "a", "1", &err_str);
-    try db.put(null, "b", "2", &err_str);
-    try db.put(null, "c", "3", &err_str);
+    try db.put(null, "a", "1", .{}, &err_str);
+    try db.put(null, "b", "2", .{}, &err_str);
+    try db.put(null, "c", "3", .{}, &err_str);
 
-    var iter = db.iterator(null, .reverse, null);
+    var iter = db.iterator(null, .reverse, null, .{});
     defer iter.deinit();
 
     // First item in reverse should be 'c'
@@ -350,11 +350,11 @@ test "Iterator with seek position" {
     const cf = families[0].handle;
     db = db.withDefaultColumnFamily(cf);
 
-    try db.put(null, "a", "1", &err_str);
-    try db.put(null, "b", "2", &err_str);
-    try db.put(null, "c", "3", &err_str);
+    try db.put(null, "a", "1", .{}, &err_str);
+    try db.put(null, "b", "2", .{}, &err_str);
+    try db.put(null, "c", "3", .{}, &err_str);
 
-    var iter = db.iterator(null, .forward, "b");
+    var iter = db.iterator(null, .forward, "b", .{});
     defer iter.deinit();
 
     const entry1 = try iter.nextKey(&err_str);
@@ -388,9 +388,9 @@ test "Iterator cleanup after exhaustion" {
     const cf = families[0].handle;
     db = db.withDefaultColumnFamily(cf);
 
-    try db.put(null, "a", "1", &err_str);
+    try db.put(null, "a", "1", .{}, &err_str);
 
-    var iter = db.iterator(null, .forward, null);
+    var iter = db.iterator(null, .forward, null, .{});
     defer iter.deinit();
 
     // Exhaust the iterator
@@ -429,11 +429,11 @@ test "RawIterator multiple operations" {
     const cf = families[0].handle;
     db = db.withDefaultColumnFamily(cf);
 
-    try db.put(null, "a", "1", &err_str);
-    try db.put(null, "b", "2", &err_str);
-    try db.put(null, "c", "3", &err_str);
+    try db.put(null, "a", "1", .{}, &err_str);
+    try db.put(null, "b", "2", .{}, &err_str);
+    try db.put(null, "c", "3", .{}, &err_str);
 
-    var raw = db.rawIterator(null);
+    var raw = db.rawIterator(null, .{});
     defer raw.deinit();
 
     // Multiple seeks

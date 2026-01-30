@@ -95,18 +95,18 @@ test "WriteBatch put/delete" {
     defer batch.deinit();
     batch.put(cf, "a", "1");
     batch.put(cf, "b", "2");
-    try db.write(batch, &err_str);
+    try db.write(batch, .{}, &err_str);
 
-    const val = try db.get(null, "a", &err_str);
+    const val = try db.get(null, "a", .{}, &err_str);
     defer if (val) |v| v.deinit();
     try std.testing.expectEqualSlices(u8, "1", val.?.data);
 
     var delete_batch = WriteBatch.init();
     defer delete_batch.deinit();
     delete_batch.delete(cf, "a");
-    try db.write(delete_batch, &err_str);
+    try db.write(delete_batch, .{}, &err_str);
 
-    const after_delete = try db.get(null, "a", &err_str);
+    const after_delete = try db.get(null, "a", .{}, &err_str);
     try std.testing.expect(after_delete == null);
 }
 
@@ -139,7 +139,7 @@ test "WriteBatch delete non-existent key" {
     defer batch.deinit();
     batch.delete(cf, "nonexistent");
     // Should not fail
-    try db.write(batch, &err_str);
+    try db.write(batch, .{}, &err_str);
 }
 
 test "WriteBatch put empty value" {
@@ -171,9 +171,9 @@ test "WriteBatch put empty value" {
     var batch = WriteBatch.init();
     defer batch.deinit();
     batch.put(cf, "key", "");
-    try db.write(batch, &err_str);
+    try db.write(batch, .{}, &err_str);
 
-    const val = try db.get(null, "key", &err_str);
+    const val = try db.get(null, "key", .{}, &err_str);
     defer if (val) |v| v.deinit();
     try std.testing.expect(val != null);
     try std.testing.expect(val.?.data.len == 0);
@@ -206,19 +206,19 @@ test "WriteBatch delete range" {
     db = db.withDefaultColumnFamily(cf);
 
     // Add some keys
-    try db.put(null, "a", "1", &err_str);
-    try db.put(null, "b", "2", &err_str);
-    try db.put(null, "c", "3", &err_str);
+    try db.put(null, "a", "1", .{}, &err_str);
+    try db.put(null, "b", "2", .{}, &err_str);
+    try db.put(null, "c", "3", .{}, &err_str);
 
     var batch = WriteBatch.init();
     defer batch.deinit();
     batch.deleteRange(cf, "a", "c");
-    try db.write(batch, &err_str);
+    try db.write(batch, .{}, &err_str);
 
     // Key "a" and "b" should be deleted, "c" should remain
-    const val_a = try db.get(null, "a", &err_str);
-    const val_b = try db.get(null, "b", &err_str);
-    const val_c = try db.get(null, "c", &err_str);
+    const val_a = try db.get(null, "a", .{}, &err_str);
+    const val_b = try db.get(null, "b", .{}, &err_str);
+    const val_c = try db.get(null, "c", .{}, &err_str);
     defer if (val_c) |v| v.deinit();
 
     try std.testing.expect(val_a == null);
@@ -263,14 +263,14 @@ test "WriteBatch multiple operations and cleanup" {
         defer allocator.free(value);
 
         batch.put(cf, key, value);
-        try db.write(batch, &err_str);
+        try db.write(batch, .{}, &err_str);
     }
 
     // Verify all keys were written
     for (0..10) |i| {
         const key = try std.fmt.allocPrint(allocator, "key_{d}", .{i});
         defer allocator.free(key);
-        const val = try db.get(null, key, &err_str);
+        const val = try db.get(null, key, .{}, &err_str);
         defer if (val) |v| v.deinit();
         try std.testing.expect(val != null);
     }
@@ -302,5 +302,5 @@ test "WriteBatch empty batch write" {
     // Write an empty batch - should succeed
     var batch = WriteBatch.init();
     defer batch.deinit();
-    try db.write(batch, &err_str);
+    try db.write(batch, .{}, &err_str);
 }

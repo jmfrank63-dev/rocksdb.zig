@@ -175,9 +175,10 @@ pub const DB = struct {
         column_family: ?ColumnFamilyHandle,
         key: []const u8,
         value: []const u8,
+        write_options: WriteOptions,
         err_str: *?Data,
     ) error{RocksDBPut}!void {
-        const options = rdb.rocksdb_writeoptions_create();
+        const options = write_options.convert();
         defer rdb.rocksdb_writeoptions_destroy(options);
         var ch = CallHandler.init(err_str);
         try ch.handle(rdb.rocksdb_put_cf(
@@ -196,10 +197,11 @@ pub const DB = struct {
         self: *const Self,
         column_family: ?ColumnFamilyHandle,
         key: []const u8,
+        read_options: ReadOptions,
         err_str: *?Data,
     ) error{RocksDBGet}!?Data {
         var valueLength: usize = 0;
-        const options = rdb.rocksdb_readoptions_create();
+        const options = read_options.convert();
         defer rdb.rocksdb_readoptions_destroy(options);
         var ch = CallHandler.init(err_str);
         const value = try ch.handle(rdb.rocksdb_get_cf(
@@ -224,9 +226,10 @@ pub const DB = struct {
         self: *const Self,
         column_family: ?ColumnFamilyHandle,
         key: []const u8,
+        write_options: WriteOptions,
         err_str: *?Data,
     ) error{RocksDBDelete}!void {
-        const options = rdb.rocksdb_writeoptions_create();
+        const options = write_options.convert();
         defer rdb.rocksdb_writeoptions_destroy(options);
         var ch = CallHandler.init(err_str);
         try ch.handle(rdb.rocksdb_delete_cf(
@@ -263,8 +266,9 @@ pub const DB = struct {
         column_family: ?ColumnFamilyHandle,
         direction: IteratorDirection,
         start: ?[]const u8,
+        read_options: ReadOptions,
     ) Iterator {
-        const it = self.rawIterator(column_family);
+        const it = self.rawIterator(column_family, read_options);
         if (start) |seek_target| switch (direction) {
             .forward => it.seek(seek_target),
             .reverse => it.seekForPrev(seek_target),
@@ -282,8 +286,9 @@ pub const DB = struct {
     pub fn rawIterator(
         self: *const Self,
         column_family: ?ColumnFamilyHandle,
+        read_options: ReadOptions,
     ) RawIterator {
-        const options = rdb.rocksdb_readoptions_create();
+        const options = read_options.convert();
         const inner_iter = rdb.rocksdb_create_iterator_cf(
             self.db,
             options,
@@ -341,9 +346,10 @@ pub const DB = struct {
     pub fn write(
         self: *const Self,
         batch: WriteBatch,
+        write_options: WriteOptions,
         err_str: *?Data,
     ) error{RocksDBWrite}!void {
-        const options = rdb.rocksdb_writeoptions_create();
+        const options = write_options.convert();
         defer rdb.rocksdb_writeoptions_destroy(options);
         var ch = CallHandler.init(err_str);
         try ch.handle(rdb.rocksdb_write(
@@ -367,6 +373,66 @@ pub const DB = struct {
             try ch.handle(rdb.rocksdb_flush_cf(self.db, options, cf, @ptrCast(&ch.err_str_in)), e)
         else
             try ch.handle(rdb.rocksdb_flush(self.db, options, @ptrCast(&ch.err_str_in)), e);
+    }
+};
+
+pub const ReadOptions = struct {
+    /// If true, all data read from underlying storage will be
+    /// verified against corresponding checksums.
+    ///
+    /// Default: false
+    verify_checksums: bool = false,
+
+    /// Should the "data block" read for this iteration be placed in block cache?
+    ///
+    /// Default: true
+    fill_cache: bool = true,
+
+    /// Specify to create a tailing iterator -- a special iterator that has a
+    /// view of the complete database (i.e. it can also be used to read newly
+    /// added data) and is optimized for sequential reads. It will return records
+    /// that were inserted into the database after the creation of the iterator.
+    /// Default: false
+    tailing: bool = false,
+
+    /// Specify the number of bytes for which the read-ahead is enabled.
+    /// If 0 (default), read-ahead is disabled.
+    ///
+    /// Default: 0
+    readahead_size: usize = 0,
+
+    fn convert(ro: ReadOptions) *rdb.struct_rocksdb_readoptions_t {
+        const rro = rdb.rocksdb_readoptions_create().?;
+        rdb.rocksdb_readoptions_set_verify_checksums(rro, @intFromBool(ro.verify_checksums));
+        rdb.rocksdb_readoptions_set_fill_cache(rro, @intFromBool(ro.fill_cache));
+        rdb.rocksdb_readoptions_set_tailing(rro, @intFromBool(ro.tailing));
+        rdb.rocksdb_readoptions_set_readahead_size(rro, ro.readahead_size);
+        return rro;
+    }
+};
+
+pub const WriteOptions = struct {
+    /// If true, the write will be flushed from the operating system
+    /// buffer cache (by calling WritableFile::Sync()) before the write
+    /// is considered complete. If this flag is true, writes will be slower.
+    ///
+    /// Default: false
+    sync: bool = false,
+
+    /// If true, writes will not first go to the write ahead log,
+    /// and the write may get lost after a crash. The backup engine
+    /// relies on write-ahead logs to back up the memtable, so if
+    /// you disable write-ahead logs, you must create backups with
+    /// flush_before_backup=true to avoid losing unflushed memtable data.
+    ///
+    /// Default: false
+    disable_wal: bool = false,
+
+    fn convert(wo: WriteOptions) *rdb.struct_rocksdb_writeoptions_t {
+        const rwo = rdb.rocksdb_writeoptions_create().?;
+        rdb.rocksdb_writeoptions_set_sync(rwo, @intFromBool(wo.sync));
+        rdb.rocksdb_writeoptions_disable_WAL(rwo, @intFromBool(wo.disable_wal));
+        return rwo;
     }
 };
 
@@ -395,14 +461,71 @@ pub const DBOptions = struct {
     /// Dynamically changeable through SetDBOptions() API.
     max_open_files: i32 = -1,
 
+    /// Amount of data to build up in memory (backed by an unsorted log
+    /// on disk) before converting to a sorted on-disk file.
+    ///
+    /// Larger values increase performance, especially during bulk loads.
+    /// Up to max_write_buffer_number write buffers may be held in memory
+    /// at the same time, so you may wish to adjust this parameter to control
+    /// memory usage.
+    ///
+    /// Default: 64MB
+    write_buffer_size: usize = 64 * 1024 * 1024,
+
+    /// The maximum number of write buffers that are built up in memory.
+    /// The default and the minimum number is 2, so that when 1 write buffer
+    /// is being flushed to storage, new writes can continue to the other
+    /// write buffer.
+    ///
+    /// Default: 2
+    max_write_buffer_number: i32 = 2,
+
+    /// Maximum number of concurrent background jobs (compactions and flushes).
+    ///
+    /// Default: 2
+    max_background_jobs: i32 = 2,
+
+    /// Compress blocks using the specified compression algorithm.
+    ///
+    /// Default: snappy if supported, otherwise no compression
+    compression: Compression = .snappy,
+
+    /// Enable direct I/O mode for reading.
+    /// They may or may not improve performance depending on the use case.
+    ///
+    /// Default: false
+    use_direct_reads: bool = false,
+
+    /// Enable direct I/O mode for flush and compaction.
+    ///
+    /// Default: false
+    use_direct_io_for_flush_and_compaction: bool = false,
+
     fn convert(do: DBOptions) *rdb.struct_rocksdb_options_t {
         const ro = rdb.rocksdb_options_create().?;
         rdb.rocksdb_options_set_create_if_missing(ro, @intFromBool(do.create_if_missing));
         rdb.rocksdb_options_set_create_missing_column_families(ro, @intFromBool(do.create_missing_column_families));
         rdb.rocksdb_options_set_max_open_files(ro, do.max_open_files);
+        rdb.rocksdb_options_set_write_buffer_size(ro, do.write_buffer_size);
+        rdb.rocksdb_options_set_max_write_buffer_number(ro, do.max_write_buffer_number);
+        rdb.rocksdb_options_set_max_background_jobs(ro, do.max_background_jobs);
+        rdb.rocksdb_options_set_compression(ro, @intFromEnum(do.compression));
+        rdb.rocksdb_options_set_use_direct_reads(ro, @intFromBool(do.use_direct_reads));
+        rdb.rocksdb_options_set_use_direct_io_for_flush_and_compaction(ro, @intFromBool(do.use_direct_io_for_flush_and_compaction));
 
         return ro;
     }
+};
+
+pub const Compression = enum(c_int) {
+    none = 0,
+    snappy = 1,
+    zlib = 2,
+    bz2 = 3,
+    lz4 = 4,
+    lz4hc = 5,
+    xpress = 6,
+    zstd = 7,
 };
 
 test "DB clean init and deinit" {
@@ -436,7 +559,10 @@ test "DB clean init and deinit" {
 }
 
 test "DBOptions defaults" {
-    try testDBOptions(DBOptions{}, rdb.rocksdb_options_create().?);
+    const expected = rdb.rocksdb_options_create().?;
+    // Set the compression to match our default
+    rdb.rocksdb_options_set_compression(expected, @intFromEnum(Compression.snappy));
+    try testDBOptions(DBOptions{}, expected);
 }
 
 test "DBOptions custom" {
@@ -444,12 +570,20 @@ test "DBOptions custom" {
         .create_if_missing = true,
         .create_missing_column_families = true,
         .max_open_files = 1234,
+        .write_buffer_size = 128 * 1024 * 1024,
+        .max_write_buffer_number = 4,
+        .max_background_jobs = 8,
+        .compression = .lz4,
     };
 
     const expected = rdb.rocksdb_options_create().?;
     rdb.rocksdb_options_set_create_if_missing(expected, 1);
     rdb.rocksdb_options_set_create_missing_column_families(expected, 1);
     rdb.rocksdb_options_set_max_open_files(expected, 1234);
+    rdb.rocksdb_options_set_write_buffer_size(expected, 128 * 1024 * 1024);
+    rdb.rocksdb_options_set_max_write_buffer_number(expected, 4);
+    rdb.rocksdb_options_set_max_background_jobs(expected, 8);
+    rdb.rocksdb_options_set_compression(expected, @intFromEnum(Compression.lz4));
 
     try testDBOptions(subject, expected);
 }
@@ -636,15 +770,15 @@ fn runTest(err_str: *?Data) !void {
         defer DB.freeColumnFamilies(allocator, families);
         const a_family = families[1].handle;
 
-        _ = try db.put(a_family, "hello", "world", err_str);
-        _ = try db.put(a_family, "zebra", "world", err_str);
+        _ = try db.put(a_family, "hello", "world", .{}, err_str);
+        _ = try db.put(a_family, "zebra", "world", .{}, err_str);
 
         db = db.withDefaultColumnFamily(a_family);
 
-        const val = try db.get(null, "hello", err_str);
+        const val = try db.get(null, "hello", .{}, err_str);
         try std.testing.expect(std.mem.eql(u8, val.?.data, "world"));
 
-        var iter = db.iterator(null, .forward, null);
+        var iter = db.iterator(null, .forward, null, .{});
         defer iter.deinit();
         var v = (try iter.nextValue(err_str)).?;
         try std.testing.expect(std.mem.eql(u8, "world", v.data));
@@ -652,9 +786,9 @@ fn runTest(err_str: *?Data) !void {
         try std.testing.expect(std.mem.eql(u8, "world", v.data));
         try std.testing.expect(null == try iter.next(err_str));
 
-        try db.delete(null, "hello", err_str);
+        try db.delete(null, "hello", .{}, err_str);
 
-        const noval = try db.get(null, "hello", err_str);
+        const noval = try db.get(null, "hello", .{}, err_str);
         try std.testing.expect(null == noval);
     }
 
@@ -715,7 +849,7 @@ test "Get non-existent key returns null" {
     const cf = families[0].handle;
     db = db.withDefaultColumnFamily(cf);
 
-    const val = try db.get(null, "nonexistent", &err_str);
+    const val = try db.get(null, "nonexistent", .{}, &err_str);
     try std.testing.expect(val == null);
 }
 
@@ -744,7 +878,7 @@ test "Delete non-existent key succeeds" {
     db = db.withDefaultColumnFamily(cf);
 
     // Should not fail even if key doesn't exist
-    try db.delete(null, "nonexistent", &err_str);
+    try db.delete(null, "nonexistent", .{}, &err_str);
 }
 
 test "Unknown column family lookup fails" {
@@ -797,8 +931,8 @@ test "Put and retrieve empty values" {
     db = db.withDefaultColumnFamily(cf);
 
     // Put with empty value
-    try db.put(null, "key", "", &err_str);
-    const val = try db.get(null, "key", &err_str);
+    try db.put(null, "key", "", .{}, &err_str);
+    const val = try db.get(null, "key", .{}, &err_str);
     defer if (val) |v| v.deinit();
     try std.testing.expect(val != null);
     try std.testing.expect(val.?.data.len == 0);
@@ -828,7 +962,7 @@ test "Iterator on empty database" {
     const cf = families[0].handle;
     db = db.withDefaultColumnFamily(cf);
 
-    var iter = db.iterator(null, .forward, null);
+    var iter = db.iterator(null, .forward, null, .{});
     defer iter.deinit();
 
     const first = try iter.next(&err_str);
@@ -859,12 +993,12 @@ test "Delete range with same start and end key" {
     const cf = families[0].handle;
     db = db.withDefaultColumnFamily(cf);
 
-    try db.put(null, "test", "value", &err_str);
+    try db.put(null, "test", "value", .{}, &err_str);
 
     // Delete with same start and end should not delete
     try db.deleteFilesInRange(null, "test", "test", &err_str);
 
-    const val = try db.get(null, "test", &err_str);
+    const val = try db.get(null, "test", .{}, &err_str);
     try std.testing.expect(val != null);
 }
 test "Error: Open non-existent DB with create_if_missing=false" {
@@ -962,7 +1096,7 @@ test "LiveFile cleanup verification" {
         defer allocator.free(key);
         const value = try std.fmt.allocPrint(allocator, "value_{d}", .{i});
         defer allocator.free(value);
-        try db.put(null, key, value, &err_str);
+        try db.put(null, key, value, .{}, &err_str);
     }
     try db.flush(null, &err_str);
 
@@ -1013,8 +1147,8 @@ test "Column family handle cleanup" {
     }
 
     // Test that CF handles work
-    try db.put(families[1].handle, "key", "value", &err_str);
-    const val = try db.get(families[1].handle, "key", &err_str);
+    try db.put(families[1].handle, "key", "value", .{}, &err_str);
+    const val = try db.get(families[1].handle, "key", .{}, &err_str);
     defer if (val) |v| v.deinit();
     try std.testing.expect(val != null);
 }
@@ -1095,7 +1229,7 @@ test "Flag: LiveFile retrieval without ordering assumptions" {
         defer allocator.free(key);
         const value = try std.fmt.allocPrint(allocator, "value_{d}", .{i});
         defer allocator.free(value);
-        try db.put(null, key, value, &err_str);
+        try db.put(null, key, value, .{}, &err_str);
     }
     try db.flush(null, &err_str);
 
@@ -1237,4 +1371,404 @@ test "CfNameToHandleMap.put allocation failure" {
     // Verify the CF was added to the map by getting it back
     const retrieved = try db.columnFamily("test_cf");
     try std.testing.expect(retrieved == handle);
+}
+
+test "DBOptions with custom write settings" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // Open database with custom write buffer settings
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .write_buffer_size = 8 * 1024 * 1024, // 8MB
+            .max_write_buffer_number = 3,
+            .max_background_jobs = 4,
+        },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Write some data to verify the database works with custom options
+    try db.put(null, "test_key", "test_value", .{}, &err_str);
+
+    const val = try db.get(null, "test_key", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualSlices(u8, "test_value", val.?.data);
+}
+
+test "WriteOptions defaults" {
+    const subject = WriteOptions{};
+    const expected = rdb.rocksdb_writeoptions_create().?;
+
+    const actual = subject.convert();
+    defer rdb.rocksdb_writeoptions_destroy(actual);
+
+    // Compare sync and disable_wal settings
+    try std.testing.expectEqual(
+        rdb.rocksdb_writeoptions_get_sync(expected),
+        rdb.rocksdb_writeoptions_get_sync(actual),
+    );
+    // Note: There's no getter for disable_WAL in RocksDB C API, so we can't test it directly
+}
+
+test "WriteOptions with sync enabled" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Write with sync enabled (slower but more durable)
+    try db.put(null, "key_sync", "value_sync", .{ .sync = true }, &err_str);
+
+    const val = try db.get(null, "key_sync", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualSlices(u8, "value_sync", val.?.data);
+}
+
+test "WriteOptions with WAL disabled" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Write with WAL disabled (faster but less durable)
+    try db.put(null, "key_no_wal", "value_no_wal", .{ .disable_wal = true }, &err_str);
+
+    const val = try db.get(null, "key_no_wal", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualSlices(u8, "value_no_wal", val.?.data);
+}
+
+test "WriteBatch with custom WriteOptions" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    var batch = WriteBatch.init();
+    defer batch.deinit();
+    batch.put(cf, "batch_key1", "batch_val1");
+    batch.put(cf, "batch_key2", "batch_val2");
+
+    // Write batch with sync and WAL disabled
+    try db.write(batch, .{ .sync = true, .disable_wal = false }, &err_str);
+
+    const val = try db.get(null, "batch_key1", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualSlices(u8, "batch_val1", val.?.data);
+}
+
+test "ReadOptions defaults" {
+    const subject = ReadOptions{};
+    const actual = subject.convert();
+    defer rdb.rocksdb_readoptions_destroy(actual);
+
+    // Verify defaults match what we set
+    try std.testing.expectEqual(@as(u8, 0), rdb.rocksdb_readoptions_get_verify_checksums(actual));
+    // fill_cache defaults to true in our struct
+    // Note: RocksDB C API doesn't have a getter for fill_cache, so we can't verify it directly
+}
+
+test "ReadOptions custom values" {
+    const subject = ReadOptions{
+        .verify_checksums = true,
+        .fill_cache = false,
+        .tailing = true,
+        .readahead_size = 128 * 1024,
+    };
+    const actual = subject.convert();
+    defer rdb.rocksdb_readoptions_destroy(actual);
+
+    // Verify verify_checksums was set
+    try std.testing.expectEqual(@as(u8, 1), rdb.rocksdb_readoptions_get_verify_checksums(actual));
+}
+
+test "ReadOptions with verify_checksums" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    try db.put(null, "key_check", "value_check", .{}, &err_str);
+
+    // Read with checksum verification enabled
+    const val = try db.get(null, "key_check", .{ .verify_checksums = true }, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualSlices(u8, "value_check", val.?.data);
+}
+
+test "ReadOptions with readahead" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Write some data
+    for (0..10) |i| {
+        const key = try std.fmt.allocPrint(allocator, "key_{d}", .{i});
+        defer allocator.free(key);
+        const value = try std.fmt.allocPrint(allocator, "value_{d}", .{i});
+        defer allocator.free(value);
+        try db.put(null, key, value, .{}, &err_str);
+    }
+
+    // Iterate with readahead enabled
+    var iter = db.iterator(null, .forward, null, .{ .readahead_size = 64 * 1024 });
+    defer iter.deinit();
+
+    var count: usize = 0;
+    while (try iter.next(&err_str)) |_| {
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 10), count);
+}
+
+test "ReadOptions with fill_cache disabled" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    try db.put(null, "key", "value", .{}, &err_str);
+
+    // Read without filling cache
+    const val = try db.get(null, "key", .{ .fill_cache = false }, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualSlices(u8, "value", val.?.data);
+}
+
+test "DBOptions with compression types" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // Test with no compression
+    {
+        var db, const families = try DB.open(
+            allocator,
+            path,
+            .{
+                .create_if_missing = true,
+                .compression = .none,
+            },
+            null,
+            false,
+            &err_str,
+        );
+        defer db.deinit();
+        defer DB.freeColumnFamilies(allocator, families);
+
+        const cf = families[0].handle;
+        db = db.withDefaultColumnFamily(cf);
+
+        try db.put(null, "key_none", "value_none", .{}, &err_str);
+        const val = try db.get(null, "key_none", .{}, &err_str);
+        defer if (val) |v| v.deinit();
+        try std.testing.expect(val != null);
+        try std.testing.expectEqualSlices(u8, "value_none", val.?.data);
+    }
+
+    // Test with LZ4 compression
+    {
+        var db, const families = try DB.open(
+            allocator,
+            path,
+            .{
+                .compression = .lz4,
+            },
+            null,
+            false,
+            &err_str,
+        );
+        defer db.deinit();
+        defer DB.freeColumnFamilies(allocator, families);
+
+        const cf = families[0].handle;
+        db = db.withDefaultColumnFamily(cf);
+
+        try db.put(null, "key_lz4", "value_lz4", .{}, &err_str);
+        const val = try db.get(null, "key_lz4", .{}, &err_str);
+        defer if (val) |v| v.deinit();
+        try std.testing.expect(val != null);
+        try std.testing.expectEqualSlices(u8, "value_lz4", val.?.data);
+    }
+}
+
+test "Compression enum values" {
+    // Verify compression enum matches RocksDB constants
+    try std.testing.expectEqual(@as(c_int, 0), @intFromEnum(Compression.none));
+    try std.testing.expectEqual(@as(c_int, 1), @intFromEnum(Compression.snappy));
+    try std.testing.expectEqual(@as(c_int, 7), @intFromEnum(Compression.zstd));
+}
+
+test "DBOptions with direct I/O" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // Note: Direct I/O may not be supported on all systems/filesystems
+    // This test verifies the option is accepted, not that it's necessarily used
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .use_direct_reads = true,
+            .use_direct_io_for_flush_and_compaction = true,
+        },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Write and read some data
+    try db.put(null, "direct_io_key", "direct_io_value", .{}, &err_str);
+    const val = try db.get(null, "direct_io_key", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualSlices(u8, "direct_io_value", val.?.data);
 }
