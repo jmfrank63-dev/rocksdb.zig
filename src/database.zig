@@ -524,7 +524,7 @@ pub const DBOptions = struct {
         rdb.rocksdb_options_set_compression(ro, @intFromEnum(do.compression));
         rdb.rocksdb_options_set_use_direct_reads(ro, @intFromBool(do.use_direct_reads));
         rdb.rocksdb_options_set_use_direct_io_for_flush_and_compaction(ro, @intFromBool(do.use_direct_io_for_flush_and_compaction));
-        
+
         // Note: compression_opts are stored but not currently applied to RocksDB options
         // The C API doesn't expose fine-grained compression control at the options level.
         // This field is reserved for future use or when we implement BlockBasedTableOptions.
@@ -641,8 +641,9 @@ fn testDBOptions(test_subject: DBOptions, expected: *rdb.struct_rocksdb_options_
 
     inline for (@typeInfo(DBOptions).@"struct".fields) |field| {
         // Only test fields that have C API getters
-        if (comptime !std.mem.eql(u8, field.name, "compression_opts") and 
-                    !std.mem.eql(u8, field.name, "enable_statistics")) {
+        if (comptime !std.mem.eql(u8, field.name, "compression_opts") and
+            !std.mem.eql(u8, field.name, "enable_statistics"))
+        {
             const getter = "rocksdb_options_get_" ++ field.name;
             const expected_value = @call(.auto, @field(rdb, getter), .{expected});
             const actual_value = @call(.auto, @field(rdb, getter), .{actual});

@@ -189,4 +189,4 @@ The wrapper provides basic key-value operations with column families. It's suita
 - 🚧 Work in progress
 - ❌ Not feasible / not applicable
 
-**Last Updated:** January 30, 2026
+**Last Updated:** January 30, 2026 (58 tests passing, 11 DBOptions + 5 ReadOptions + 2 WriteOptions + CompressionOptions)
