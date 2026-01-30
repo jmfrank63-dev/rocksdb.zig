@@ -602,6 +602,12 @@ pub const DynamicDBOptions = struct {
     /// Waiting for C API: rocksdb_options_set_target_file_size_is_upper_bound
     /// Tracked by: https://github.com/facebook/rocksdb/issues/XXXXX
     target_file_size_is_upper_bound: ?bool = null,
+
+    /// Allow trivial move during compaction (added in v10.9.1)
+    /// Enables moving files between levels without rewriting when possible.
+    /// Waiting for C API: rocksdb_options_set_allow_trivial_move
+    /// Tracked by: https://github.com/facebook/rocksdb/issues/XXXXX
+    allow_trivial_move: ?bool = null,
 };
 
 pub const DBOptions = struct {
@@ -676,6 +682,18 @@ pub const DBOptions = struct {
     /// Optional block size for block-based table format.
     /// If null, RocksDB's default block size is used.
     block_size: ?usize = null,
+
+    /// Optional bloom filter policy for block-based table format.
+    /// When set, a bloom filter is created and attached to the table factory.
+    filter_policy: ?FilterPolicyOptions = null,
+
+    /// Optional whole key filtering for block-based table format.
+    /// If null, RocksDB's default is used.
+    whole_key_filtering: ?bool = null,
+
+    /// Optional index type for block-based table format.
+    /// If null, RocksDB's default is used.
+    index_type: ?IndexType = null,
 
     /// Enable statistics collection for performance monitoring.
     /// When enabled, statistics can be accessed through the GetProperty API.
@@ -795,7 +813,7 @@ pub const DBOptions = struct {
         rdb.rocksdb_options_set_enable_pipelined_write(ro, @intFromBool(do.enable_pipelined_write));
         rdb.rocksdb_options_set_max_total_wal_size(ro, do.max_total_wal_size);
 
-        if (do.block_cache != null or do.block_size != null) {
+        if (do.block_cache != null or do.block_size != null or do.filter_policy != null or do.whole_key_filtering != null or do.index_type != null) {
             const block_opts = rdb.rocksdb_block_based_options_create().?;
             // BLOCK-BASED TABLE OPTIONS LIFETIME:
             // - rocksdb_options_set_block_based_table_factory() COPIES the block-based
@@ -806,6 +824,26 @@ pub const DBOptions = struct {
 
             if (do.block_size) |size| {
                 rdb.rocksdb_block_based_options_set_block_size(block_opts, size);
+            }
+
+            if (do.filter_policy) |fp| {
+                const policy = if (fp.use_full)
+                    rdb.rocksdb_filterpolicy_create_bloom_full(fp.bits_per_key).?
+                else
+                    rdb.rocksdb_filterpolicy_create_bloom(fp.bits_per_key).?;
+                // FILTER POLICY LIFETIME SEMANTICS:
+                // - The block-based table factory may keep a reference to the policy
+                // - Do NOT destroy the policy here; RocksDB manages its lifetime
+                // - This mirrors the cache ownership model used above
+                rdb.rocksdb_block_based_options_set_filter_policy(block_opts, policy);
+            }
+
+            if (do.whole_key_filtering) |enabled| {
+                rdb.rocksdb_block_based_options_set_whole_key_filtering(block_opts, @intFromBool(enabled));
+            }
+
+            if (do.index_type) |it| {
+                rdb.rocksdb_block_based_options_set_index_type(block_opts, @intFromEnum(it));
             }
 
             if (do.block_cache) |cache_opts| {
@@ -834,10 +872,10 @@ fn applyDynamicDBOptions(
 ) (Allocator.Error || error{RocksDBSetOptions})!void {
     // Build dynamic options strings with NUL termination.
     // Keys are static NUL-terminated literals; only values need allocation.
-    var alloc_buffers: [2][]u8 = undefined; // Only values
+    var alloc_buffers: [3][]u8 = undefined; // Only values
     var alloc_count: usize = 0;
-    var key_ptrs: [2][*c]const u8 = undefined;
-    var val_ptrs: [2][*c]const u8 = undefined;
+    var key_ptrs: [3][*c]const u8 = undefined;
+    var val_ptrs: [3][*c]const u8 = undefined;
     var count: usize = 0;
 
     defer {
@@ -876,6 +914,20 @@ fn applyDynamicDBOptions(
         count += 1;
     }
 
+    if (dyno.allow_trivial_move) |enabled| {
+        // Allocate and NUL-terminate the value
+        const val_lit = if (enabled) "true" else "false";
+        var val_buf = try allocator.alloc(u8, val_lit.len + 1);
+        @memcpy(val_buf[0..val_lit.len], val_lit);
+        val_buf[val_lit.len] = 0;
+        alloc_buffers[alloc_count] = val_buf;
+        alloc_count += 1;
+
+        key_ptrs[count] = "allow_trivial_move\x00";
+        val_ptrs[count] = @ptrCast(val_buf.ptr);
+        count += 1;
+    }
+
     if (count > 0) {
         var ch = CallHandler.init(err_str);
         rdb.rocksdb_set_options(
@@ -900,7 +952,8 @@ fn applyDynamicDBOptions(
 /// Check if any dynamic DB options are set.
 fn hasDynamicDBOptions(dyno: DynamicDBOptions) bool {
     return dyno.max_manifest_space_amp_pct != null or
-        dyno.target_file_size_is_upper_bound != null;
+    dyno.target_file_size_is_upper_bound != null or
+    dyno.allow_trivial_move != null;
 }
 
 pub const Compression = enum(c_int) {
@@ -944,6 +997,27 @@ pub const CompressionOptions = struct {
 pub const BlockCacheOptions = struct {
     /// Size of the block cache in bytes.
     size_bytes: usize,
+};
+
+/// Index type for block-based table indexing.
+pub const IndexType = enum(c_int) {
+    binary_search = rdb.rocksdb_block_based_table_index_type_binary_search,
+    hash_search = rdb.rocksdb_block_based_table_index_type_hash_search,
+    two_level_index_search = rdb.rocksdb_block_based_table_index_type_two_level_index_search,
+};
+
+/// Bloom filter policy options for block-based tables.
+pub const FilterPolicyOptions = struct {
+    /// Bits per key for bloom filter.
+    /// Higher values improve accuracy but increase memory usage.
+    ///
+    /// Default: 10.0
+    bits_per_key: f64 = 10.0,
+
+    /// Use full bloom filter (more accurate but slightly slower).
+    ///
+    /// Default: false
+    use_full: bool = false,
 };
 
 test "DB clean init and deinit" {
@@ -1266,7 +1340,7 @@ fn testDBOptions(test_subject: DBOptions, expected: *rdb.struct_rocksdb_options_
 
     inline for (@typeInfo(DBOptions).@"struct".fields) |field| {
         // Skip fields that:
-        // - Don't have C API getters (block_cache, block_size, compression_opts, enable_statistics, dynamic)
+        // - Don't have C API getters (block_cache, block_size, compression_opts, enable_statistics, filter_policy, index_type, whole_key_filtering, dynamic)
         // - Have getters that may not exist in all RocksDB versions (use_direct_reads, use_direct_io_for_flush_and_compaction)
         // - Priority 2 options without reliable getters across versions (target_file_size_base, max_bytes_for_level_base, etc.)
         // - dynamic is tested elsewhere (uses rocksdb_set_options, not direct getters)
@@ -1274,6 +1348,9 @@ fn testDBOptions(test_subject: DBOptions, expected: *rdb.struct_rocksdb_options_
             std.mem.eql(u8, field.name, "block_size") or
             std.mem.eql(u8, field.name, "compression_opts") or
             std.mem.eql(u8, field.name, "enable_statistics") or
+            std.mem.eql(u8, field.name, "filter_policy") or
+            std.mem.eql(u8, field.name, "whole_key_filtering") or
+            std.mem.eql(u8, field.name, "index_type") or
             std.mem.eql(u8, field.name, "use_direct_reads") or
             std.mem.eql(u8, field.name, "use_direct_io_for_flush_and_compaction") or
             std.mem.eql(u8, field.name, "target_file_size_base") or
@@ -3035,7 +3112,7 @@ test "Dynamic options both set simultaneously" {
     var err_str: ?Data = null;
     defer if (err_str) |e| e.deinit();
 
-    // Test both dynamic options at once - exercises two-slot limit
+    // Test both dynamic options at once - exercises multi-option path
     const result = DB.open(
         allocator,
         path,
@@ -3044,6 +3121,56 @@ test "Dynamic options both set simultaneously" {
             .dynamic = .{
                 .max_manifest_space_amp_pct = 50,
                 .target_file_size_is_upper_bound = true,
+            },
+        },
+        null,
+        false,
+        &err_str,
+    );
+
+    if (result) |pair| {
+        var db, const families = pair;
+        defer db.deinit();
+        defer DB.freeColumnFamilies(allocator, families);
+
+        const cf = families[0].handle;
+        db = db.withDefaultColumnFamily(cf);
+
+        // Verify database is functional
+        try db.put(null, "key1", "value1", .{}, &err_str);
+        const val = try db.get(null, "key1", .{}, &err_str);
+        defer if (val) |v| v.deinit();
+        try std.testing.expect(val != null);
+    } else |e| {
+        // Dynamic options may not be settable post-open, that's expected
+        if (e == error.RocksDBSetOptions) {
+            // Error was handled correctly
+        } else {
+            return e;
+        }
+    }
+}
+
+test "Dynamic options all set simultaneously" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // Test all dynamic options at once - exercises three-slot limit
+    const result = DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .dynamic = .{
+                .max_manifest_space_amp_pct = 50,
+                .target_file_size_is_upper_bound = true,
+                .allow_trivial_move = true,
             },
         },
         null,
@@ -3114,6 +3241,43 @@ test "Block cache capacity property verification" {
     const capacity = std.fmt.parseInt(usize, prop_data.data, 10) catch unreachable;
     try std.testing.expect(capacity > 0);
     try std.testing.expect(capacity >= cache_size);
+}
+
+test "Block-based options with bloom filter and index settings" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .filter_policy = .{ .bits_per_key = 10.0, .use_full = false },
+            .whole_key_filtering = true,
+            .index_type = .hash_search,
+        },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Basic write/read to verify options are accepted
+    try db.put(null, "bf_key", "bf_value", .{}, &err_str);
+    const val = try db.get(null, "bf_key", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualStrings("bf_value", val.?.data);
 }
 
 test "ReadOptions composition - snapshot + verify_checksums + no fill_cache" {

@@ -14,7 +14,7 @@ The wrapper provides basic key-value operations with column families. It's suita
 - ✅ Write batches
 - ✅ Basic metadata (liveFiles, properties)
 - ✅ DB.destroy: Delete database from filesystem
-- ✅ DBOptions: 14 options (create_if_missing, create_missing_column_families, max_open_files, write_buffer_size, max_write_buffer_number, max_background_jobs, max_manifest_file_size, compression, compression_opts, block_cache, block_size, use_direct_reads, use_direct_io_for_flush_and_compaction, enable_statistics)
+- ✅ DBOptions: Core options + compaction/write performance tuning + block-based table options
 - ⏳ DynamicDBOptions: 2 options pending C API (max_manifest_space_amp_pct, target_file_size_is_upper_bound)
 - ✅ ReadOptions: 6 options (verify_checksums, fill_cache, tailing, readahead_size, snapshot, and defaults)
 - ⏳ DynamicReadOptions: 1 option pending C API (allow_unprepared_value - v9.8.0+)
@@ -60,9 +60,9 @@ The wrapper provides basic key-value operations with column families. It's suita
 
 ### Bloom Filters & Indexing
 
-- [ ] `filter_policy` - Bloom filter configuration
-- [ ] `whole_key_filtering` - Key vs prefix filtering
-- [ ] `index_type` - Binary search vs hash index
+- [x] `filter_policy` - Bloom filter configuration
+- [x] `whole_key_filtering` - Key vs prefix filtering
+- [x] `index_type` - Binary search vs hash index
 
 ### Compaction Control
 
@@ -70,7 +70,7 @@ The wrapper provides basic key-value operations with column families. It's suita
 - [x] `target_file_size_base` / `target_file_size_multiplier` - File sizing
 - [x] `max_bytes_for_level_base` / `max_bytes_for_level_multiplier` - Level sizing
 - [x] Manual compaction trigger API (compactRange)
-- [ ] `allow_trivial_move` (v10.9.1) - Efficient file movement
+- ⏳ `allow_trivial_move` (v10.9.1) - Efficient file movement (implemented in DynamicDBOptions, awaiting C API)
 
 ### Write Performance
 
@@ -173,7 +173,7 @@ Options waiting for C API exposure are separated into `Dynamic*Options` structs:
 #### DynamicDBOptions (Functional)
 
 - **Status**: ✅ Fully functional with complete error visibility
-- **Options**: max_manifest_space_amp_pct (v10.9.1), target_file_size_is_upper_bound (v10.9.1)
+- **Options**: max_manifest_space_amp_pct (v10.9.1), target_file_size_is_upper_bound (v10.9.1), allow_trivial_move (v10.9.1)
 - **Applied**: Post-open in `DB.open()` via `applyDynamicDBOptions()`
 - **Error Handling**:
   - Returns `error.RocksDBSetOptions` if RocksDB rejects the option
@@ -185,7 +185,7 @@ Options waiting for C API exposure are separated into `Dynamic*Options` structs:
   - All errors visible, surfaced, and properly freed (no leaks)
   - Proper cleanup via defer blocks even on error
 - **Limitations**:
-  - Hard limit of 2 options (expand buffer array if adding more)
+  - Hard limit of 3 options (expand buffer array if adding more)
   - Some options may not be settable on already-open database (RocksDB limitation)
 
 #### DynamicReadOptions (Placeholder)
@@ -252,7 +252,7 @@ This approach provides:
 - 🚧 Work in progress
 - ❌ Not feasible / not applicable
 
-**Last Updated:** January 30, 2026 (Comprehensive test suite, Priority 2 complete with compaction/performance options, 81 tests passing)
+**Last Updated:** January 30, 2026 (Comprehensive test suite, Priority 2 complete with compaction/performance + bloom/index options)
 
 **Priority 1: ✅ COMPLETE** - All critical options and configuration features implemented
 **Priority 2: ✅ COMPLETE** - All core performance features implemented
