@@ -26,14 +26,22 @@ const copyLen = lib.data.copyLen;
 // - Column family handles: Owned by CfNameToHandleMap, destroyed on map.destroy()
 //   which happens during db.deinit(). Callers must NOT manually destroy handles.
 //
-// FULLY IMPLEMENTED FEATURES:
-// - DB.destroy(): Fully functional, calls rocksdb_destroy_db() (see line ~148)
-// - compression_opts: Wired through rocksdb_options_set_compression_options()
-// - enable_statistics: Wired through rocksdb_options_enable_statistics()
-// - block_cache: LRU cache with proper reference-counted lifetime management
-// - block_size: Applied via block-based table factory
-// - use_direct_reads, use_direct_io_for_flush_and_compaction: Set and accepted
-//   (Note: Direct I/O tests verify acceptance, not that I/O is actually direct)
+// OPTIONS STATUS (what's set vs. verified):
+// - DB.destroy(): Fully implemented and tested with rocksdb_destroy_db()
+// - compression_opts: Set via rocksdb_options_set_compression_options() (smoke-tested)
+// - enable_statistics: Set via rocksdb_options_enable_statistics() (smoke-tested)
+// - block_cache: LRU cache set and reference-counted (smoke-tested, cache not leaked)
+// - block_size: Set via block-based table factory (smoke-tested)
+// - use_direct_reads, use_direct_io_for_flush_and_compaction: Set and accepted by RocksDB
+//   (smoke-tested only - actual direct I/O behavior not verified at runtime)
+// - fill_cache: Set but cannot be verified (no C API getter exists)
+//
+// SMOKE-TESTED means: option is set, DB opens successfully, basic operations work.
+// It does NOT mean: option behavior is validated (e.g., actual direct I/O, actual compression).
+//
+// API VERSION ASSUMPTIONS:
+// - Cache reference counting: tested with RocksDB 7.x-9.x, relies on stable C API since v6.0
+// - block_based table options copying: documented C API behavior since v5.0
 //
 // TESTING:
 // - 60 tests passing with comprehensive coverage
@@ -839,7 +847,7 @@ test "DB.destroy removes database" {
     try std.testing.expectError(error.RocksDBOpen, result);
 }
 
-test "DBOptions with compression_opts" {
+test "DBOptions accepts compression_opts (smoke test)" {
     const allocator = std.testing.allocator;
     var dir = std.testing.tmpDir(.{});
     defer dir.cleanup();
@@ -882,7 +890,7 @@ test "DBOptions with compression_opts" {
     try std.testing.expectEqualSlices(u8, test_data, val.?.data);
 }
 
-test "DBOptions with statistics enabled" {
+test "DBOptions accepts statistics (smoke test)" {
     const allocator = std.testing.allocator;
     var dir = std.testing.tmpDir(.{});
     defer dir.cleanup();
@@ -932,7 +940,7 @@ test "DBOptions with statistics enabled" {
     try db.flush(null, &err_str);
 }
 
-test "DBOptions with statistics disabled" {
+test "DBOptions accepts disabled statistics (smoke test)" {
     const allocator = std.testing.allocator;
     var dir = std.testing.tmpDir(.{});
     defer dir.cleanup();
@@ -1080,6 +1088,12 @@ const CfNameToHandleMap = struct {
     /// SAFETY:
     /// - All operations are protected by a reader-writer lock
     /// - Handles must not be used after the map is destroyed (i.e., after db.deinit())
+    ///
+    /// TODO: When drop_column_family() is implemented, add a remove() method that:
+    ///   - Calls rocksdb_drop_column_family() first
+    ///   - Then calls rocksdb_column_family_handle_destroy()
+    ///   - Finally removes the entry from the map
+    ///   This prevents the double-destroy risk during map.destroy()
     allocator: Allocator,
     map: std.StringHashMapUnmanaged(ColumnFamilyHandle),
     owned_names: std.StringHashMapUnmanaged(void), // Track which names we own
