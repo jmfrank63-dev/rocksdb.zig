@@ -30,7 +30,7 @@ const copyLen = lib.data.copyLen;
 // - DB.destroy(): Fully implemented and tested with rocksdb_destroy_db()
 // - compression_opts: Set via rocksdb_options_set_compression_options() (smoke-tested)
 // - enable_statistics: Set via rocksdb_options_enable_statistics() (smoke-tested)
-// - block_cache: LRU cache set and reference-counted (smoke-tested, cache not leaked)
+// - block_cache: LRU cache set and reference-counted (smoke-tested; expected not to leak per RocksDB refcounting)
 // - block_size: Set via block-based table factory (smoke-tested)
 // - use_direct_reads, use_direct_io_for_flush_and_compaction: Set and accepted by RocksDB
 //   (smoke-tested only - actual direct I/O behavior not verified at runtime)
