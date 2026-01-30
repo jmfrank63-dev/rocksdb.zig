@@ -138,11 +138,26 @@ pub const DB = struct {
     }
 
     /// Delete the entire database from the filesystem.
-    /// The database must be closed before calling this.
-    /// Note: This function is currently not fully implemented.
-    /// TODO: Implement with rocksdb_destroy_db(options, path, err)
-    pub fn destroy(_: Self) error{NotImplemented}!void {
-        return error.NotImplemented;
+    /// This removes all database files in the specified directory.
+    /// The database must NOT be open when this is called.
+    ///
+    /// Parameters:
+    ///   - path: Directory containing the database
+    ///   - db_options: Options used to identify the database structure
+    ///   - err_str: Error string output parameter
+    pub fn destroy(
+        path: []const u8,
+        db_options: DBOptions,
+        err_str: *?Data,
+    ) error{RocksDBDestroy}!void {
+        const opts = db_options.convert();
+        defer rdb.rocksdb_options_destroy(opts);
+
+        var ch = CallHandler.init(err_str);
+        _ = try ch.handle(
+            rdb.rocksdb_destroy_db(opts, @ptrCast(path), @ptrCast(&ch.err_str_in)),
+            error.RocksDBDestroy,
+        );
     }
 
     pub fn createColumnFamily(
@@ -711,6 +726,50 @@ test "DBOptions with block_cache" {
     const val = try db.get(null, "block_cache_key", .{}, &err_str);
     defer if (val) |v| v.deinit();
     try std.testing.expect(val != null);
+}
+
+test "DB.destroy removes database" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // Create and populate database
+    {
+        var db, const families = try DB.open(
+            allocator,
+            path,
+            .{ .create_if_missing = true },
+            null,
+            false,
+            &err_str,
+        );
+        const cf = families[0].handle;
+        db = db.withDefaultColumnFamily(cf);
+
+        try db.put(null, "test_key", "test_value", .{}, &err_str);
+
+        db.deinit();
+        DB.freeColumnFamilies(allocator, families);
+    }
+
+    // Destroy the database
+    try DB.destroy(path, .{}, &err_str);
+
+    // Try to open the destroyed database without create_if_missing - should fail
+    const result = DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = false },
+        null,
+        false,
+        &err_str,
+    );
+    try std.testing.expectError(error.RocksDBOpen, result);
 }
 
 fn testDBOptions(test_subject: DBOptions, expected: *rdb.struct_rocksdb_options_t) !void {
