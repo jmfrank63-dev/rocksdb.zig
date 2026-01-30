@@ -90,10 +90,10 @@ test "Data format with different content" {
     try std.testing.expectEqualSlices(u8, text, stream.getWritten());
 }
 
-test "BUG: Data deinit semantics unclear - double free risk" {
-    // This test documents the current behavior where deinit can be called multiple times.
-    // This is dangerous in real usage with rocksdb_free as it would double-free.
-    // Decision needed: either make idempotent or document as single-use only.
+test "Data deinit is single-use - not idempotent" {
+    // This test verifies that Data.deinit should only be called once.
+    // Calling it multiple times with rocksdb_free would cause a double-free.
+    // Users must ensure deinit is called exactly once, typically via defer.
     var call_count: usize = 0;
     const counting_free = struct {
         fn free(ptr: ?*anyopaque) callconv(.c) void {
@@ -110,9 +110,9 @@ test "BUG: Data deinit semantics unclear - double free risk" {
     data.deinit();
     try std.testing.expectEqual(@as(usize, 1), call_count);
 
-    // Second deinit would double-free with real rocksdb_free!
-    // For now, this test just documents the behavior.
-    // TODO: Make Data.deinit idempotent or document as single-use
+    // Note: Not calling deinit again to avoid documenting unsafe behavior.
+    // DO NOT call deinit twice with rocksdb_free - it will double-free!
+    // Use defer to ensure deinit is called exactly once.
 }
 
 test "Copy with large buffer" {
