@@ -11,6 +11,11 @@ const IteratorDirection = lib.IteratorDirection;
 const RawIterator = lib.RawIterator;
 const WriteBatch = lib.WriteBatch;
 
+/// Opaque handle to a RocksDB snapshot.
+/// Snapshots provide consistent point-in-time views of the database.
+/// Must be released with DB.releaseSnapshot() when no longer needed.
+pub const Snapshot = *const rdb.rocksdb_snapshot_t;
+
 const copy = lib.data.copy;
 const copyLen = lib.data.copyLen;
 
@@ -430,6 +435,23 @@ pub const DB = struct {
         else
             try ch.handle(rdb.rocksdb_flush(self.db, options, @ptrCast(&ch.err_str_in)), e);
     }
+
+    /// Create a snapshot of the current database state.
+    /// The snapshot provides a consistent point-in-time view of the database.
+    /// Reads using this snapshot will see the database state as it was when
+    /// the snapshot was created, unaffected by subsequent writes.
+    ///
+    /// The snapshot must be released with releaseSnapshot() when no longer needed.
+    /// Snapshots are lightweight but holding them prevents deletion of old data.
+    pub fn createSnapshot(self: *const Self) Snapshot {
+        return rdb.rocksdb_create_snapshot(self.db).?;
+    }
+
+    /// Release a previously created snapshot.
+    /// After calling this, the snapshot handle becomes invalid and must not be used.
+    pub fn releaseSnapshot(self: *const Self, snapshot: Snapshot) void {
+        rdb.rocksdb_release_snapshot(self.db, snapshot);
+    }
 };
 
 /// Dynamic ReadOptions that use direct C API setters (once exposed).
@@ -473,6 +495,13 @@ pub const ReadOptions = struct {
     /// Default: 0
     readahead_size: usize = 0,
 
+    /// If non-null, read from this snapshot.
+    /// Snapshot provides a consistent read-only view of the database at the time
+    /// the snapshot was created.
+    ///
+    /// Default: null (read from current state)
+    snapshot: ?Snapshot = null,
+
     /// Dynamic options waiting for C API exposure.
     /// Uses rocksdb_set_options with string-based configuration.
     dynamic: DynamicReadOptions = .{},
@@ -483,6 +512,9 @@ pub const ReadOptions = struct {
         rdb.rocksdb_readoptions_set_fill_cache(rro, @intFromBool(ro.fill_cache));
         rdb.rocksdb_readoptions_set_tailing(rro, @intFromBool(ro.tailing));
         rdb.rocksdb_readoptions_set_readahead_size(rro, ro.readahead_size);
+        if (ro.snapshot) |snap| {
+            rdb.rocksdb_readoptions_set_snapshot(rro, snap);
+        }
         return rro;
     }
 };
@@ -504,10 +536,20 @@ pub const WriteOptions = struct {
     /// Default: false
     disable_wal: bool = false,
 
+    /// If true, this write request is of lower priority if compaction is
+    /// behind. In this case, no_slowdown = true, the request will be cancelled
+    /// immediately with Status::Incomplete() returned. Otherwise, it will be
+    /// slowed down. The slowdown value is determined by RocksDB to guarantee
+    /// it introduces minimum impacts to high priority writes.
+    ///
+    /// Default: false
+    low_pri: bool = false,
+
     fn convert(wo: WriteOptions) *rdb.struct_rocksdb_writeoptions_t {
         const rwo = rdb.rocksdb_writeoptions_create().?;
         rdb.rocksdb_writeoptions_set_sync(rwo, @intFromBool(wo.sync));
         rdb.rocksdb_writeoptions_disable_WAL(rwo, @intFromBool(wo.disable_wal));
+        rdb.rocksdb_writeoptions_set_low_pri(rwo, @intFromBool(wo.low_pri));
         return rwo;
     }
 };
@@ -2526,4 +2568,108 @@ test "ReadOptions with DynamicReadOptions placeholder" {
     };
 
     try std.testing.expect(read_opts.dynamic.allow_unprepared_value == true);
+}
+
+test "Snapshot provides consistent point-in-time reads" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Write initial value
+    try db.put(null, "key1", "value1", .{}, &err_str);
+
+    // Create snapshot
+    const snapshot = db.createSnapshot();
+    defer db.releaseSnapshot(snapshot);
+
+    // Modify data after snapshot
+    try db.put(null, "key1", "value2", .{}, &err_str);
+    try db.put(null, "key2", "added_after_snapshot", .{}, &err_str);
+
+    // Read with snapshot - should see old data
+    const val_snap = try db.get(null, "key1", .{ .snapshot = snapshot }, &err_str);
+    defer if (val_snap) |v| v.deinit();
+    try std.testing.expect(val_snap != null);
+    try std.testing.expectEqualStrings("value1", val_snap.?.data);
+
+    // Read without snapshot - should see new data
+    const val_current = try db.get(null, "key1", .{}, &err_str);
+    defer if (val_current) |v| v.deinit();
+    try std.testing.expect(val_current != null);
+    try std.testing.expectEqualStrings("value2", val_current.?.data);
+
+    // Key added after snapshot should not be visible in snapshot
+    const val_new_snap = try db.get(null, "key2", .{ .snapshot = snapshot }, &err_str);
+    defer if (val_new_snap) |v| v.deinit();
+    try std.testing.expect(val_new_snap == null);
+
+    // But should be visible without snapshot
+    const val_new = try db.get(null, "key2", .{}, &err_str);
+    defer if (val_new) |v| v.deinit();
+    try std.testing.expect(val_new != null);
+    try std.testing.expectEqualStrings("added_after_snapshot", val_new.?.data);
+}
+
+test "WriteOptions with low_pri flag" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Write with low priority flag
+    // This is a smoke test - we verify the option is accepted
+    // Actual priority behavior depends on RocksDB's internal state
+    try db.put(null, "key1", "value1", .{ .low_pri = true }, &err_str);
+
+    // Verify data was written
+    const val = try db.get(null, "key1", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualStrings("value1", val.?.data);
+
+    // Write with normal priority
+    try db.put(null, "key2", "value2", .{ .low_pri = false }, &err_str);
+
+    // Verify both writes succeeded
+    const val2 = try db.get(null, "key2", .{}, &err_str);
+    defer if (val2) |v| v.deinit();
+    try std.testing.expect(val2 != null);
+    try std.testing.expectEqualStrings("value2", val2.?.data);
 }

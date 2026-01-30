@@ -16,13 +16,14 @@ The wrapper provides basic key-value operations with column families. It's suita
 - ✅ DB.destroy: Delete database from filesystem
 - ✅ DBOptions: 14 options (create_if_missing, create_missing_column_families, max_open_files, write_buffer_size, max_write_buffer_number, max_background_jobs, max_manifest_file_size, compression, compression_opts, block_cache, block_size, use_direct_reads, use_direct_io_for_flush_and_compaction, enable_statistics)
 - ⏳ DynamicDBOptions: 2 options pending C API (max_manifest_space_amp_pct, target_file_size_is_upper_bound)
-- ✅ ReadOptions: 5 options (verify_checksums, fill_cache, tailing, readahead_size, and defaults)
+- ✅ ReadOptions: 6 options (verify_checksums, fill_cache, tailing, readahead_size, snapshot, and defaults)
 - ⏳ DynamicReadOptions: 1 option pending C API (allow_unprepared_value - v9.8.0+)
-- ✅ CompressionOptions: 4 options (window_bits, max_dict_bytes, zstd_max_train_bytes, parallel_threads)
+- ✅ WriteOptions: 3 options (sync, disable_WAL, low_pri)
 - ✅ CompressionOptions: 4 options (window_bits, max_dict_bytes, zstd_max_train_bytes, parallel_threads)
 - ✅ BlockCacheOptions: 1 option (size_bytes for LRU cache)
+- ✅ Snapshots: Create and release snapshots for point-in-time reads
 
-## Priority 1: Critical Options & Configuration
+## Priority 1: Critical Options & Configuration ✅ COMPLETE
 
 ### DBOptions Expansion
 
@@ -46,14 +47,14 @@ The wrapper provides basic key-value operations with column families. It's suita
 
 - [x] `verify_checksums` - Data integrity checking
 - [x] `fill_cache` - Block cache population control
-- [ ] `snapshot` - Point-in-time reads
+- [x] `snapshot` - Point-in-time reads
 - [x] `readahead_size` - Prefetch optimization
 
 ### WriteOptions
 
 - [x] `sync` - Force fsync for durability
 - [x] `disable_WAL` - Skip write-ahead log
-- [ ] `low_pri` - Low priority writes
+- [x] `low_pri` - Low priority writes
 
 ## Priority 2: Performance Features
 
@@ -251,4 +252,6 @@ This approach provides:
 - 🚧 Work in progress
 - ❌ Not feasible / not applicable
 
-**Last Updated:** January 30, 2026 (65+ tests passing, 14 DBOptions + 5 ReadOptions + 2 WriteOptions + 2 DynamicDBOptions + 1 DynamicReadOptions + CompressionOptions + BlockCacheOptions + DB.destroy)
+**Last Updated:** January 30, 2026 (67 tests passing, 14 DBOptions + 6 ReadOptions + 3 WriteOptions + 2 DynamicDBOptions + 1 DynamicReadOptions + CompressionOptions + BlockCacheOptions + Snapshots + DB.destroy)
+
+**Priority 1: ✅ COMPLETE** - All critical options and configuration features implemented
