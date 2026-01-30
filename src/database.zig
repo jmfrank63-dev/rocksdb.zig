@@ -50,7 +50,7 @@ const copyLen = lib.data.copyLen;
 // - block_based table options copying: documented C API behavior since v5.0
 //
 // TESTING:
-// - Comprehensive test coverage for all features (see ROADMAP for current totals)
+// - Test coverage totals are tracked in ROADMAP (keep this block qualitative)
 // - testDBOptions skips fields without reliable C API getters across RocksDB versions
 //   (block_cache, block_size, compression_opts, enable_statistics, direct I/O flags)
 // - All options objects in tests properly destroyed via defer statements
@@ -487,6 +487,712 @@ pub const DB = struct {
     }
 };
 
+pub const TransactionIsolationLevel = enum {
+    /// Reads observe only committed data.
+    read_committed,
+    /// Reads observe a consistent snapshot taken at transaction start.
+    snapshot,
+};
+
+pub const TransactionOptions = struct {
+    /// Isolation level for transaction reads.
+    /// Default: read_committed
+    isolation_level: TransactionIsolationLevel = .read_committed,
+
+    /// Enable deadlock detection.
+    /// Default: false
+    deadlock_detect: bool = false,
+
+    /// Lock timeout in milliseconds. If null, RocksDB default is used.
+    /// Default: null
+    lock_timeout: ?i64 = null,
+
+    /// Transaction expiration time in milliseconds. If null, RocksDB default is used.
+    /// Default: null
+    expiration: ?i64 = null,
+
+    /// Deadlock detect depth. If null, RocksDB default is used.
+    /// Default: null
+    deadlock_detect_depth: ?i64 = null,
+
+    /// Max write batch size for the transaction.
+    /// If null, RocksDB default is used.
+    /// Default: null
+    max_write_batch_size: ?usize = null,
+
+    /// Skip prepare phase for 2PC.
+    /// Default: false
+    skip_prepare: bool = false,
+
+    fn convert(to: TransactionOptions) *rdb.rocksdb_transaction_options_t {
+        const opt = rdb.rocksdb_transaction_options_create().?;
+        rdb.rocksdb_transaction_options_set_set_snapshot(
+            opt,
+            @intFromBool(to.isolation_level == .snapshot),
+        );
+        rdb.rocksdb_transaction_options_set_deadlock_detect(opt, @intFromBool(to.deadlock_detect));
+        if (to.lock_timeout) |timeout| {
+            rdb.rocksdb_transaction_options_set_lock_timeout(opt, timeout);
+        }
+        if (to.expiration) |expiration| {
+            rdb.rocksdb_transaction_options_set_expiration(opt, expiration);
+        }
+        if (to.deadlock_detect_depth) |depth| {
+            rdb.rocksdb_transaction_options_set_deadlock_detect_depth(opt, depth);
+        }
+        if (to.max_write_batch_size) |size| {
+            rdb.rocksdb_transaction_options_set_max_write_batch_size(opt, size);
+        }
+        rdb.rocksdb_transaction_options_set_skip_prepare(opt, @intFromBool(to.skip_prepare));
+        return opt;
+    }
+};
+
+pub const OptimisticTransactionOptions = struct {
+    /// Isolation level for transaction reads.
+    /// Default: read_committed
+    isolation_level: TransactionIsolationLevel = .read_committed,
+
+    fn convert(to: OptimisticTransactionOptions) *rdb.rocksdb_optimistictransaction_options_t {
+        const opt = rdb.rocksdb_optimistictransaction_options_create().?;
+        rdb.rocksdb_optimistictransaction_options_set_set_snapshot(
+            opt,
+            @intFromBool(to.isolation_level == .snapshot),
+        );
+        return opt;
+    }
+};
+
+pub const TransactionDBOptions = struct {
+    /// Maximum number of locks tracked at once. If null, RocksDB default is used.
+    /// Default: null
+    max_num_locks: ?i64 = null,
+
+    /// Number of stripes for lock table. If null, RocksDB default is used.
+    /// Default: null
+    num_stripes: ?usize = null,
+
+    /// Lock timeout for transactions in milliseconds. If null, RocksDB default is used.
+    /// Default: null
+    transaction_lock_timeout: ?i64 = null,
+
+    /// Default lock timeout for keys in milliseconds. If null, RocksDB default is used.
+    /// Default: null
+    default_lock_timeout: ?i64 = null,
+
+    fn convert(to: TransactionDBOptions) *rdb.rocksdb_transactiondb_options_t {
+        const opt = rdb.rocksdb_transactiondb_options_create().?;
+        if (to.max_num_locks) |value| {
+            rdb.rocksdb_transactiondb_options_set_max_num_locks(opt, value);
+        }
+        if (to.num_stripes) |value| {
+            rdb.rocksdb_transactiondb_options_set_num_stripes(opt, value);
+        }
+        if (to.transaction_lock_timeout) |value| {
+            rdb.rocksdb_transactiondb_options_set_transaction_lock_timeout(opt, value);
+        }
+        if (to.default_lock_timeout) |value| {
+            rdb.rocksdb_transactiondb_options_set_default_lock_timeout(opt, value);
+        }
+        return opt;
+    }
+};
+
+pub const Transaction = struct {
+    txn: *rdb.rocksdb_transaction_t,
+    default_cf: ?ColumnFamilyHandle = null,
+
+    const Self = @This();
+
+    pub fn withDefaultColumnFamily(self: Self, column_family: ColumnFamilyHandle) Self {
+        return .{ .txn = self.txn, .default_cf = column_family };
+    }
+
+    pub fn deinit(self: Self) void {
+        rdb.rocksdb_transaction_destroy(self.txn);
+    }
+
+    pub fn setSavepoint(self: *const Self) void {
+        rdb.rocksdb_transaction_set_savepoint(self.txn);
+    }
+
+    pub fn rollbackToSavepoint(
+        self: *const Self,
+        err_str: *?Data,
+    ) error{RocksDBTransactionRollback}!void {
+        var ch = CallHandler.init(err_str);
+        try ch.handle(
+            rdb.rocksdb_transaction_rollback_to_savepoint(self.txn, @ptrCast(&ch.err_str_in)),
+            error.RocksDBTransactionRollback,
+        );
+    }
+
+    pub fn prepare(
+        self: *const Self,
+        err_str: *?Data,
+    ) error{RocksDBTransactionPrepare}!void {
+        var ch = CallHandler.init(err_str);
+        try ch.handle(
+            rdb.rocksdb_transaction_prepare(self.txn, @ptrCast(&ch.err_str_in)),
+            error.RocksDBTransactionPrepare,
+        );
+    }
+
+    pub fn commit(
+        self: *const Self,
+        err_str: *?Data,
+    ) error{RocksDBTransactionCommit}!void {
+        var ch = CallHandler.init(err_str);
+        try ch.handle(
+            rdb.rocksdb_transaction_commit(self.txn, @ptrCast(&ch.err_str_in)),
+            error.RocksDBTransactionCommit,
+        );
+    }
+
+    pub fn rollback(
+        self: *const Self,
+        err_str: *?Data,
+    ) error{RocksDBTransactionRollback}!void {
+        var ch = CallHandler.init(err_str);
+        try ch.handle(
+            rdb.rocksdb_transaction_rollback(self.txn, @ptrCast(&ch.err_str_in)),
+            error.RocksDBTransactionRollback,
+        );
+    }
+
+    pub fn getSnapshot(self: *const Self) ?Snapshot {
+        return rdb.rocksdb_transaction_get_snapshot(self.txn);
+    }
+
+    fn validateSnapshot(self: *const Self, read_options: ReadOptions) error{TransactionSnapshotMismatch}!void {
+        _ = self;
+        if (read_options.snapshot != null) {
+            return error.TransactionSnapshotMismatch;
+        }
+    }
+
+    pub fn put(
+        self: *const Self,
+        column_family: ?ColumnFamilyHandle,
+        key: []const u8,
+        value: []const u8,
+        err_str: *?Data,
+    ) error{RocksDBTransactionPut}!void {
+        var ch = CallHandler.init(err_str);
+        try ch.handle(rdb.rocksdb_transaction_put_cf(
+            self.txn,
+            column_family orelse self.default_cf,
+            key.ptr,
+            key.len,
+            value.ptr,
+            value.len,
+            @ptrCast(&ch.err_str_in),
+        ), error.RocksDBTransactionPut);
+    }
+
+    pub fn get(
+        self: *const Self,
+        column_family: ?ColumnFamilyHandle,
+        key: []const u8,
+        read_options: ReadOptions,
+        err_str: *?Data,
+    ) error{ RocksDBTransactionGet, TransactionSnapshotMismatch }!?Data {
+        try self.validateSnapshot(read_options);
+        var value_length: usize = 0;
+        const options = read_options.convert();
+        defer rdb.rocksdb_readoptions_destroy(options);
+        var ch = CallHandler.init(err_str);
+        const value = try ch.handle(rdb.rocksdb_transaction_get_cf(
+            self.txn,
+            options,
+            column_family orelse self.default_cf,
+            key.ptr,
+            key.len,
+            &value_length,
+            @ptrCast(&ch.err_str_in),
+        ), error.RocksDBTransactionGet);
+        if (value == 0) {
+            return null;
+        }
+        return .{ .free = rdb.rocksdb_free, .data = value[0..value_length] };
+    }
+
+    pub fn getForUpdate(
+        self: *const Self,
+        column_family: ?ColumnFamilyHandle,
+        key: []const u8,
+        read_options: ReadOptions,
+        exclusive: bool,
+        err_str: *?Data,
+    ) error{ RocksDBTransactionGet, TransactionSnapshotMismatch }!?Data {
+        try self.validateSnapshot(read_options);
+        var value_length: usize = 0;
+        const options = read_options.convert();
+        defer rdb.rocksdb_readoptions_destroy(options);
+        var ch = CallHandler.init(err_str);
+        const value = try ch.handle(rdb.rocksdb_transaction_get_for_update_cf(
+            self.txn,
+            options,
+            column_family orelse self.default_cf,
+            key.ptr,
+            key.len,
+            &value_length,
+            @intFromBool(exclusive),
+            @ptrCast(&ch.err_str_in),
+        ), error.RocksDBTransactionGet);
+        if (value == 0) {
+            return null;
+        }
+        return .{ .free = rdb.rocksdb_free, .data = value[0..value_length] };
+    }
+
+    pub fn delete(
+        self: *const Self,
+        column_family: ?ColumnFamilyHandle,
+        key: []const u8,
+        err_str: *?Data,
+    ) error{RocksDBTransactionDelete}!void {
+        var ch = CallHandler.init(err_str);
+        try ch.handle(rdb.rocksdb_transaction_delete_cf(
+            self.txn,
+            column_family orelse self.default_cf,
+            key.ptr,
+            key.len,
+            @ptrCast(&ch.err_str_in),
+        ), error.RocksDBTransactionDelete);
+    }
+
+    pub fn iterator(
+        self: *const Self,
+        column_family: ?ColumnFamilyHandle,
+        direction: IteratorDirection,
+        start: ?[]const u8,
+        read_options: ReadOptions,
+    ) Iterator {
+        const it = self.rawIterator(column_family, read_options);
+        if (start) |seek_target| switch (direction) {
+            .forward => it.seek(seek_target),
+            .reverse => it.seekForPrev(seek_target),
+        } else switch (direction) {
+            .forward => it.seekToFirst(),
+            .reverse => it.seekToLast(),
+        }
+        return .{ .raw = it, .direction = direction, .done = false };
+    }
+
+    pub fn rawIterator(
+        self: *const Self,
+        column_family: ?ColumnFamilyHandle,
+        read_options: ReadOptions,
+    ) RawIterator {
+        if (read_options.snapshot != null) {
+            self.validateSnapshot(read_options) catch |e| {
+                std.debug.panic("Transaction snapshot mismatch: {s}", .{@errorName(e)});
+            };
+        }
+        const options = read_options.convert();
+        const inner_iter = rdb.rocksdb_transaction_create_iterator_cf(
+            self.txn,
+            options,
+            column_family orelse self.default_cf,
+        ).?;
+        return RawIterator{ .inner = inner_iter, .read_options = options };
+    }
+};
+
+pub const TransactionDB = struct {
+    db: *rdb.rocksdb_transactiondb_t,
+    default_cf: ?ColumnFamilyHandle = null,
+    cf_name_to_handle: *CfNameToHandleMap,
+
+    const Self = @This();
+
+    /// Free the column families array returned by open().
+    /// Must be called with the same allocator used in open().
+    pub fn freeColumnFamilies(allocator: Allocator, families: []const ColumnFamily) void {
+        for (families) |cf| {
+            allocator.free(cf.name);
+        }
+        allocator.free(families);
+    }
+
+    pub fn open(
+        allocator: Allocator,
+        dir: []const u8,
+        db_options: DBOptions,
+        txn_db_options: TransactionDBOptions,
+        maybe_column_families: ?[]const ColumnFamilyDescription,
+        err_str: *?Data,
+    ) (Allocator.Error || error{ RocksDBTransactionOpen, RocksDBSetOptions })!struct { Self, []const ColumnFamily } {
+        const column_families = if (maybe_column_families) |cfs|
+            cfs
+        else
+            &[1]ColumnFamilyDescription{.{ .name = "default" }};
+
+        const cf_handles = try allocator.alloc(?ColumnFamilyHandle, column_families.len);
+        defer allocator.free(cf_handles);
+
+        const txn_db = txn_db: {
+            const cf_options = try allocator.alloc(?*const rdb.rocksdb_options_t, column_families.len);
+            defer allocator.free(cf_options);
+            const cf_names = try allocator.alloc([*c]const u8, column_families.len);
+            defer allocator.free(cf_names);
+            for (column_families, 0..) |cf, i| {
+                cf_names[i] = @ptrCast(cf.name.ptr);
+                cf_options[i] = cf.options.convert();
+            }
+            defer for (cf_options) |opt| {
+                if (opt) |o| rdb.rocksdb_options_destroy(@constCast(o));
+            };
+
+            const db_opts = db_options.convert();
+            defer rdb.rocksdb_options_destroy(db_opts);
+            const txn_opts = txn_db_options.convert();
+            defer rdb.rocksdb_transactiondb_options_destroy(txn_opts);
+
+            var ch = CallHandler.init(err_str);
+            const ret = rdb.rocksdb_transactiondb_open_column_families(
+                db_opts,
+                txn_opts,
+                dir.ptr,
+                @intCast(cf_names.len),
+                @ptrCast(cf_names.ptr),
+                @ptrCast(cf_options.ptr),
+                @ptrCast(cf_handles.ptr),
+                @ptrCast(&ch.err_str_in),
+            );
+            break :txn_db try ch.handle(ret, error.RocksDBTransactionOpen);
+        };
+
+        const cf_list = try allocator.alloc(ColumnFamily, column_families.len);
+        errdefer {
+            allocator.free(cf_list);
+        }
+        var initialized_count: usize = 0;
+        errdefer {
+            for (cf_list[0..initialized_count]) |cf| {
+                allocator.free(cf.name);
+            }
+        }
+
+        const cf_map = try CfNameToHandleMap.create(allocator);
+        errdefer cf_map.destroy();
+        for (cf_list, 0..) |*cf, i| {
+            const name = try allocator.dupe(u8, column_families[i].name);
+            errdefer allocator.free(name);
+            cf.* = .{ .name = name, .handle = cf_handles[i].? };
+            try cf_map.putUnowned(name, cf_handles[i].?);
+            initialized_count = i + 1;
+        }
+
+        if (hasDynamicDBOptions(db_options.dynamic)) {
+            const base_db = rdb.rocksdb_transactiondb_get_base_db(txn_db.?).?;
+            try applyDynamicDBOptions(base_db, db_options.dynamic, allocator, err_str);
+        }
+
+        return .{ Self{ .db = txn_db.?, .cf_name_to_handle = cf_map }, cf_list };
+    }
+
+    pub fn withDefaultColumnFamily(self: Self, column_family: ColumnFamilyHandle) Self {
+        return .{ .db = self.db, .cf_name_to_handle = self.cf_name_to_handle, .default_cf = column_family };
+    }
+
+    pub fn deinit(self: Self) void {
+        self.cf_name_to_handle.destroy();
+        rdb.rocksdb_transactiondb_close(self.db);
+    }
+
+    pub fn createColumnFamily(
+        self: *Self,
+        name: []const u8,
+        err_str: *?Data,
+    ) !ColumnFamilyHandle {
+        const options = rdb.rocksdb_options_create();
+        defer rdb.rocksdb_options_destroy(options);
+        var ch = CallHandler.init(err_str);
+        const handle = (try ch.handle(rdb.rocksdb_transactiondb_create_column_family(
+            self.db,
+            options,
+            @ptrCast(name),
+            @ptrCast(&ch.err_str_in),
+        ), error.RocksDBCreateColumnFamily)).?;
+        try self.cf_name_to_handle.put(name, handle);
+        return handle;
+    }
+
+    pub fn columnFamily(
+        self: *const Self,
+        cf_name: []const u8,
+    ) error{UnknownColumnFamily}!ColumnFamilyHandle {
+        return self.cf_name_to_handle.get(cf_name) orelse error.UnknownColumnFamily;
+    }
+
+    pub fn beginTransaction(
+        self: *const Self,
+        write_options: WriteOptions,
+        transaction_options: TransactionOptions,
+    ) error{RocksDBTransactionBegin}!Transaction {
+        const options = write_options.convert();
+        defer rdb.rocksdb_writeoptions_destroy(options);
+        const txn_opts = transaction_options.convert();
+        defer rdb.rocksdb_transaction_options_destroy(txn_opts);
+        const txn = rdb.rocksdb_transaction_begin(self.db, options, txn_opts, null);
+        if (txn == null) {
+            return error.RocksDBTransactionBegin;
+        }
+        return Transaction{ .txn = txn.?, .default_cf = self.default_cf };
+    }
+
+    pub fn put(
+        self: *const Self,
+        column_family: ?ColumnFamilyHandle,
+        key: []const u8,
+        value: []const u8,
+        write_options: WriteOptions,
+        err_str: *?Data,
+    ) error{RocksDBPut}!void {
+        const options = write_options.convert();
+        defer rdb.rocksdb_writeoptions_destroy(options);
+        var ch = CallHandler.init(err_str);
+        try ch.handle(rdb.rocksdb_transactiondb_put_cf(
+            self.db,
+            options,
+            column_family orelse self.default_cf,
+            key.ptr,
+            key.len,
+            value.ptr,
+            value.len,
+            @ptrCast(&ch.err_str_in),
+        ), error.RocksDBPut);
+    }
+
+    pub fn get(
+        self: *const Self,
+        column_family: ?ColumnFamilyHandle,
+        key: []const u8,
+        read_options: ReadOptions,
+        err_str: *?Data,
+    ) error{RocksDBGet}!?Data {
+        var valueLength: usize = 0;
+        const options = read_options.convert();
+        defer rdb.rocksdb_readoptions_destroy(options);
+        var ch = CallHandler.init(err_str);
+        const value = try ch.handle(rdb.rocksdb_transactiondb_get_cf(
+            self.db,
+            options,
+            column_family orelse self.default_cf,
+            key.ptr,
+            key.len,
+            &valueLength,
+            @ptrCast(&ch.err_str_in),
+        ), error.RocksDBGet);
+        if (value == 0) {
+            return null;
+        }
+        return .{ .free = rdb.rocksdb_free, .data = value[0..valueLength] };
+    }
+
+    pub fn delete(
+        self: *const Self,
+        column_family: ?ColumnFamilyHandle,
+        key: []const u8,
+        write_options: WriteOptions,
+        err_str: *?Data,
+    ) error{RocksDBDelete}!void {
+        const options = write_options.convert();
+        defer rdb.rocksdb_writeoptions_destroy(options);
+        var ch = CallHandler.init(err_str);
+        try ch.handle(rdb.rocksdb_transactiondb_delete_cf(
+            self.db,
+            options,
+            column_family orelse self.default_cf,
+            key.ptr,
+            key.len,
+            @ptrCast(&ch.err_str_in),
+        ), error.RocksDBDelete);
+    }
+
+    pub fn createSnapshot(self: *const Self) Snapshot {
+        return rdb.rocksdb_transactiondb_create_snapshot(self.db).?;
+    }
+
+    pub fn releaseSnapshot(self: *const Self, snapshot: Snapshot) void {
+        rdb.rocksdb_transactiondb_release_snapshot(self.db, snapshot);
+    }
+
+    pub fn iterator(
+        self: *const Self,
+        column_family: ?ColumnFamilyHandle,
+        direction: IteratorDirection,
+        start: ?[]const u8,
+        read_options: ReadOptions,
+    ) Iterator {
+        const it = self.rawIterator(column_family, read_options);
+        if (start) |seek_target| switch (direction) {
+            .forward => it.seek(seek_target),
+            .reverse => it.seekForPrev(seek_target),
+        } else switch (direction) {
+            .forward => it.seekToFirst(),
+            .reverse => it.seekToLast(),
+        }
+        return .{ .raw = it, .direction = direction, .done = false };
+    }
+
+    pub fn rawIterator(
+        self: *const Self,
+        column_family: ?ColumnFamilyHandle,
+        read_options: ReadOptions,
+    ) RawIterator {
+        const options = read_options.convert();
+        const inner_iter = rdb.rocksdb_transactiondb_create_iterator_cf(
+            self.db,
+            options,
+            column_family orelse self.default_cf,
+        ).?;
+        return RawIterator{ .inner = inner_iter, .read_options = options };
+    }
+};
+
+pub const OptimisticTransactionDB = struct {
+    db: *rdb.rocksdb_optimistictransactiondb_t,
+    default_cf: ?ColumnFamilyHandle = null,
+    cf_name_to_handle: *CfNameToHandleMap,
+
+    const Self = @This();
+
+    /// Free the column families array returned by open().
+    /// Must be called with the same allocator used in open().
+    pub fn freeColumnFamilies(allocator: Allocator, families: []const ColumnFamily) void {
+        for (families) |cf| {
+            allocator.free(cf.name);
+        }
+        allocator.free(families);
+    }
+
+    pub fn open(
+        allocator: Allocator,
+        dir: []const u8,
+        db_options: DBOptions,
+        maybe_column_families: ?[]const ColumnFamilyDescription,
+        err_str: *?Data,
+    ) (Allocator.Error || error{ RocksDBTransactionOpen, RocksDBSetOptions })!struct { Self, []const ColumnFamily } {
+        const column_families = if (maybe_column_families) |cfs|
+            cfs
+        else
+            &[1]ColumnFamilyDescription{.{ .name = "default" }};
+
+        const cf_handles = try allocator.alloc(?ColumnFamilyHandle, column_families.len);
+        defer allocator.free(cf_handles);
+
+        const db = db: {
+            const cf_options = try allocator.alloc(?*const rdb.rocksdb_options_t, column_families.len);
+            defer allocator.free(cf_options);
+            const cf_names = try allocator.alloc([*c]const u8, column_families.len);
+            defer allocator.free(cf_names);
+            for (column_families, 0..) |cf, i| {
+                cf_names[i] = @ptrCast(cf.name.ptr);
+                cf_options[i] = cf.options.convert();
+            }
+            defer for (cf_options) |opt| {
+                if (opt) |o| rdb.rocksdb_options_destroy(@constCast(o));
+            };
+
+            const db_opts = db_options.convert();
+            defer rdb.rocksdb_options_destroy(db_opts);
+
+            var ch = CallHandler.init(err_str);
+            const ret = rdb.rocksdb_optimistictransactiondb_open_column_families(
+                db_opts,
+                dir.ptr,
+                @intCast(cf_names.len),
+                @ptrCast(cf_names.ptr),
+                @ptrCast(cf_options.ptr),
+                @ptrCast(cf_handles.ptr),
+                @ptrCast(&ch.err_str_in),
+            );
+            break :db try ch.handle(ret, error.RocksDBTransactionOpen);
+        };
+
+        const cf_list = try allocator.alloc(ColumnFamily, column_families.len);
+        errdefer {
+            allocator.free(cf_list);
+        }
+        var initialized_count: usize = 0;
+        errdefer {
+            for (cf_list[0..initialized_count]) |cf| {
+                allocator.free(cf.name);
+            }
+        }
+        const cf_map = try CfNameToHandleMap.create(allocator);
+        errdefer cf_map.destroy();
+        for (cf_list, 0..) |*cf, i| {
+            const name = try allocator.dupe(u8, column_families[i].name);
+            errdefer allocator.free(name);
+            cf.* = .{ .name = name, .handle = cf_handles[i].? };
+            try cf_map.putUnowned(name, cf_handles[i].?);
+            initialized_count = i + 1;
+        }
+
+        if (hasDynamicDBOptions(db_options.dynamic)) {
+            const base_db = rdb.rocksdb_optimistictransactiondb_get_base_db(db.?).?;
+            try applyDynamicDBOptions(base_db, db_options.dynamic, allocator, err_str);
+        }
+
+        return .{ Self{ .db = db.?, .cf_name_to_handle = cf_map }, cf_list };
+    }
+
+    pub fn withDefaultColumnFamily(self: Self, column_family: ColumnFamilyHandle) Self {
+        return .{ .db = self.db, .cf_name_to_handle = self.cf_name_to_handle, .default_cf = column_family };
+    }
+
+    pub fn deinit(self: Self) void {
+        self.cf_name_to_handle.destroy();
+        rdb.rocksdb_optimistictransactiondb_close(self.db);
+    }
+
+    pub fn createColumnFamily(
+        self: *Self,
+        name: []const u8,
+        err_str: *?Data,
+    ) !ColumnFamilyHandle {
+        const options = rdb.rocksdb_options_create();
+        defer rdb.rocksdb_options_destroy(options);
+        const base_db = rdb.rocksdb_optimistictransactiondb_get_base_db(self.db).?;
+        var ch = CallHandler.init(err_str);
+        const handle = (try ch.handle(rdb.rocksdb_create_column_family(
+            base_db,
+            options,
+            @ptrCast(name),
+            @ptrCast(&ch.err_str_in),
+        ), error.RocksDBCreateColumnFamily)).?;
+        try self.cf_name_to_handle.put(name, handle);
+        return handle;
+    }
+
+    pub fn columnFamily(
+        self: *const Self,
+        cf_name: []const u8,
+    ) error{UnknownColumnFamily}!ColumnFamilyHandle {
+        return self.cf_name_to_handle.get(cf_name) orelse error.UnknownColumnFamily;
+    }
+
+    pub fn beginTransaction(
+        self: *const Self,
+        write_options: WriteOptions,
+        transaction_options: OptimisticTransactionOptions,
+    ) error{RocksDBTransactionBegin}!Transaction {
+        const options = write_options.convert();
+        defer rdb.rocksdb_writeoptions_destroy(options);
+        const txn_opts = transaction_options.convert();
+        defer rdb.rocksdb_optimistictransaction_options_destroy(txn_opts);
+        const txn = rdb.rocksdb_optimistictransaction_begin(self.db, options, txn_opts, null);
+        if (txn == null) {
+            return error.RocksDBTransactionBegin;
+        }
+        return Transaction{ .txn = txn.?, .default_cf = self.default_cf };
+    }
+};
+
 /// Dynamic ReadOptions that use direct C API setters (once exposed).
 /// These options are not yet exposed in the RocksDB C API but are implemented in C++.
 /// When the C API is extended (rocksdb_readoptions_set_allow_unprepared_value),
@@ -531,6 +1237,10 @@ pub const ReadOptions = struct {
     /// If non-null, read from this snapshot.
     /// Snapshot provides a consistent read-only view of the database at the time
     /// the snapshot was created.
+    ///
+    /// NOTE: Snapshot must come from the same DB/TransactionDB as the operation.
+    /// Passing a snapshot from another DB (or base DB into a Transaction) is UB.
+    /// For transaction operations, leave this null and use transaction snapshots.
     ///
     /// Default: null (read from current state)
     snapshot: ?Snapshot = null,
@@ -832,9 +1542,8 @@ pub const DBOptions = struct {
                 else
                     rdb.rocksdb_filterpolicy_create_bloom(fp.bits_per_key).?;
                 // FILTER POLICY LIFETIME SEMANTICS:
-                // - The block-based table factory may keep a reference to the policy
-                // - Do NOT destroy the policy here; RocksDB manages its lifetime
-                // - This mirrors the cache ownership model used above
+                // - RocksDB takes ownership via shared_ptr in Options/TableFactory
+                // - Do NOT destroy here; options destruction releases the shared_ptr
                 rdb.rocksdb_block_based_options_set_filter_policy(block_opts, policy);
             }
 
@@ -887,6 +1596,7 @@ fn applyDynamicDBOptions(
     }
 
     if (dyno.max_manifest_space_amp_pct) |pct| {
+        std.debug.assert(count < max_dynamic);
         // Allocate and NUL-terminate the value
         const val_str = try std.fmt.allocPrint(allocator, "{d}", .{pct});
         defer allocator.free(val_str);
@@ -902,6 +1612,7 @@ fn applyDynamicDBOptions(
     }
 
     if (dyno.target_file_size_is_upper_bound) |enabled| {
+        std.debug.assert(count < max_dynamic);
         // Allocate and NUL-terminate the value
         const val_lit = if (enabled) "true" else "false";
         var val_buf = try allocator.alloc(u8, val_lit.len + 1);
@@ -916,6 +1627,7 @@ fn applyDynamicDBOptions(
     }
 
     if (dyno.allow_trivial_move) |enabled| {
+        std.debug.assert(count < max_dynamic);
         // Allocate and NUL-terminate the value
         const val_lit = if (enabled) "true" else "false";
         var val_buf = try allocator.alloc(u8, val_lit.len + 1);
@@ -1333,6 +2045,189 @@ test "DBOptions accepts disabled statistics (smoke test)" {
     const val = try db.get(null, "no_stats_key", .{}, &err_str);
     defer if (val) |v| v.deinit();
     try std.testing.expect(val != null);
+}
+
+test "DBOptions compaction and wal limits applied" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .target_file_size_base = 32 * 1024 * 1024,
+            .max_total_wal_size = 64 * 1024 * 1024,
+        },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    const options_ptr = rdb.rocksdb_property_value(db.db, "rocksdb.options");
+    if (options_ptr == null) {
+        return;
+    }
+    const options_text: Data = .{ .data = std.mem.span(options_ptr), .free = rdb.rocksdb_free };
+    defer options_text.deinit();
+
+    try std.testing.expect(std.mem.indexOf(u8, options_text.data, "target_file_size_base") != null);
+    try std.testing.expect(std.mem.indexOf(u8, options_text.data, "max_total_wal_size") != null);
+}
+
+test "TransactionDB commit and rollback" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try TransactionDB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .create_missing_column_families = true,
+        },
+        .{
+            .default_lock_timeout = 1000,
+            .transaction_lock_timeout = 1000,
+        },
+        null,
+        &err_str,
+    );
+    defer db.deinit();
+    defer TransactionDB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    var txn = try db.beginTransaction(.{}, .{
+        .isolation_level = .snapshot,
+        .deadlock_detect = true,
+        .lock_timeout = 1000,
+        .deadlock_detect_depth = 50,
+        .skip_prepare = true,
+    });
+    defer txn.deinit();
+
+    try txn.put(null, "txn_key", "v1", &err_str);
+    const val_before = try txn.get(null, "txn_key", .{}, &err_str);
+    defer if (val_before) |v| v.deinit();
+    try std.testing.expect(val_before != null);
+    try std.testing.expectEqualSlices(u8, "v1", val_before.?.data);
+    try txn.commit(&err_str);
+
+    var txn2 = try db.beginTransaction(.{}, .{});
+    defer txn2.deinit();
+    const val_after = try txn2.get(null, "txn_key", .{}, &err_str);
+    defer if (val_after) |v| v.deinit();
+    try std.testing.expect(val_after != null);
+    try std.testing.expectEqualSlices(u8, "v1", val_after.?.data);
+
+    var txn3 = try db.beginTransaction(.{}, .{ .isolation_level = .snapshot });
+    defer txn3.deinit();
+    const locked = try txn3.getForUpdate(null, "txn_key", .{}, true, &err_str);
+    defer if (locked) |v| v.deinit();
+    try txn3.put(null, "txn_key", "v2", &err_str);
+    try txn3.rollback(&err_str);
+
+    var txn4 = try db.beginTransaction(.{}, .{});
+    defer txn4.deinit();
+    const val_final = try txn4.get(null, "txn_key", .{}, &err_str);
+    defer if (val_final) |v| v.deinit();
+    try std.testing.expect(val_final != null);
+    try std.testing.expectEqualSlices(u8, "v1", val_final.?.data);
+}
+
+test "Transaction snapshot mismatch guard" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try TransactionDB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .create_missing_column_families = true,
+        },
+        .{},
+        null,
+        &err_str,
+    );
+    defer db.deinit();
+    defer TransactionDB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    const db_snapshot = db.createSnapshot();
+    defer db.releaseSnapshot(db_snapshot);
+
+    var txn = try db.beginTransaction(.{}, .{ .isolation_level = .snapshot, .skip_prepare = true });
+    defer txn.deinit();
+
+    const mismatch = txn.get(null, "k", .{ .snapshot = db_snapshot }, &err_str);
+    try std.testing.expectError(error.TransactionSnapshotMismatch, mismatch);
+}
+
+test "OptimisticTransactionDB commit" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try OptimisticTransactionDB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .create_missing_column_families = true,
+        },
+        null,
+        &err_str,
+    );
+    defer db.deinit();
+    defer OptimisticTransactionDB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    var txn = try db.beginTransaction(.{}, .{ .isolation_level = .snapshot });
+    defer txn.deinit();
+    try txn.put(null, "otxn_key", "otxn_value", &err_str);
+    try txn.commit(&err_str);
+
+    var reader = try db.beginTransaction(.{}, .{});
+    defer reader.deinit();
+    const val = try reader.get(null, "otxn_key", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualSlices(u8, "otxn_value", val.?.data);
 }
 
 fn testDBOptions(test_subject: DBOptions, expected: *rdb.struct_rocksdb_options_t) !void {

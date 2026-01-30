@@ -82,9 +82,9 @@ The wrapper provides basic key-value operations with column families. It's suita
 
 ### Transactions
 
-- [ ] `OptimisticTransactionDB` - Optimistic transactions
-- [ ] `TransactionDB` - Pessimistic transactions with locking
-- [ ] Transaction options (isolation levels, deadlock detection)
+- [x] `OptimisticTransactionDB` - Optimistic transactions
+- [x] `TransactionDB` - Pessimistic transactions with locking
+- [x] Transaction options (isolation levels, deadlock detection)
 
 ### Merge Operators
 
@@ -153,6 +153,69 @@ The wrapper provides basic key-value operations with column families. It's suita
 
 - [ ] Write SST files directly
 - [ ] Ingest external SST files
+
+## Implementation Plan (Remaining Work)
+
+1. **Batch Operations**
+
+- Implement `MultiGet` (C API) with CF support
+- Implement `MultiPutEntity` (or emulate via WriteBatch if C API missing)
+- Tests for mixed CF and error propagation
+
+1. **Monitoring & Statistics**
+
+- Expand `GetProperty` coverage and typed helpers
+- Add statistics + histogram accessors
+- Tests verifying properties and counters return data
+
+1. **Backup & Recovery**
+
+- Wrap `Checkpoint` and `BackupEngine`
+- Add restore flow
+- Tests for checkpoint/backup/restore
+
+1. **Transactions**
+
+- Add `OptimisticTransactionDB` and `TransactionDB` (if exposed in C API)
+- Add transaction options (isolation/deadlock) or placeholders if C++-only
+- Tests for commit/rollback and concurrency
+
+1. **Merge Operators**
+
+- Built-in associative merge operators
+- Custom merge logic if/when C API exposes hooks
+- Tests for merge correctness
+
+1. **TTL & Cleanup**
+
+- TTL DB support (if C API available)
+- Compaction filters for cleanup (or placeholders if C++-only)
+- Tests for expiry/cleanup
+
+1. **Rate Limiting**
+
+- `RateLimiter` integration in options
+- Tests for option acceptance
+
+1. **Universal Compaction**
+
+- `CompactionOptionsUniversal` wrapper
+- Tests for DB open with universal compaction
+
+1. **Column Family Management**
+
+- Drop CF + CF metadata introspection
+- Multi-CF options migration helpers
+- Tests for create/drop/metadata
+
+1. **Snapshot Iteration**
+
+- Snapshot-bound iterators with stability tests
+
+1. **SstFileWriter / External SST**
+
+- Wrap SST writer and ingestion APIs
+- Tests for write+ingest flow
 
 ## Implementation Notes
 
