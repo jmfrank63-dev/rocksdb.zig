@@ -13,10 +13,11 @@ The wrapper provides basic key-value operations with column families. It's suita
 - ✅ Iterators (forward/reverse)
 - ✅ Write batches
 - ✅ Basic metadata (liveFiles, properties)
-- ✅ DBOptions: 11 options (create_if_missing, create_missing_column_families, max_open_files, write_buffer_size, max_write_buffer_number, max_background_jobs, compression, compression_opts, use_direct_reads, use_direct_io_for_flush_and_compaction, enable_statistics)
+- ✅ DBOptions: 13 options (create_if_missing, create_missing_column_families, max_open_files, write_buffer_size, max_write_buffer_number, max_background_jobs, compression, block_cache, block_size, use_direct_reads, use_direct_io_for_flush_and_compaction, plus defaults)
 - ✅ ReadOptions: 5 options (verify_checksums, fill_cache, tailing, readahead_size, and defaults)
 - ✅ WriteOptions: 2 options (sync, disable_WAL)
 - ✅ CompressionOptions: 4 options (window_bits, max_dict_bytes, zstd_max_train_bytes, parallel_threads)
+- ✅ BlockCacheOptions: 1 option (size_bytes)
 
 ## Priority 1: Critical Options & Configuration
 
@@ -26,8 +27,8 @@ The wrapper provides basic key-value operations with column families. It's suita
 - [x] `max_write_buffer_number` - Number of memtables
 - [x] `compression` - Compression type (none, snappy, zstd, lz4)
 - [x] `compression_opts` - Compression level settings
-- [ ] `block_cache` - LRU/LFU cache configuration
-- [ ] `block_size` - SST block size
+- [x] `block_cache` - LRU cache configuration
+- [x] `block_size` - SST block size
 - [x] `max_background_jobs` - Parallel compaction/flush threads
 - [x] `use_direct_reads` / `use_direct_io_for_flush_and_compaction` - Direct I/O
 - [x] `statistics` - Performance monitoring
@@ -189,4 +190,4 @@ The wrapper provides basic key-value operations with column families. It's suita
 - 🚧 Work in progress
 - ❌ Not feasible / not applicable
 
-**Last Updated:** January 30, 2026 (58 tests passing, 11 DBOptions + 5 ReadOptions + 2 WriteOptions + CompressionOptions)
+**Last Updated:** January 30, 2026 (56 tests passing, 13 DBOptions + 5 ReadOptions + 2 WriteOptions + CompressionOptions + BlockCacheOptions)

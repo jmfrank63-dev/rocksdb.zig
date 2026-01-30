@@ -490,6 +490,14 @@ pub const DBOptions = struct {
     /// Default: snappy if supported, otherwise no compression
     compression: Compression = .snappy,
 
+    /// Optional block cache settings for block-based table format.
+    /// When set, a block cache is created and assigned to the table factory.
+    block_cache: ?BlockCacheOptions = null,
+
+    /// Optional block size for block-based table format.
+    /// If null, RocksDB's default block size is used.
+    block_size: ?usize = null,
+
     /// Enable direct I/O mode for reading.
     /// They may or may not improve performance depending on the use case.
     ///
@@ -512,6 +520,23 @@ pub const DBOptions = struct {
         rdb.rocksdb_options_set_compression(ro, @intFromEnum(do.compression));
         rdb.rocksdb_options_set_use_direct_reads(ro, @intFromBool(do.use_direct_reads));
         rdb.rocksdb_options_set_use_direct_io_for_flush_and_compaction(ro, @intFromBool(do.use_direct_io_for_flush_and_compaction));
+
+        if (do.block_cache != null or do.block_size != null) {
+            const block_opts = rdb.rocksdb_block_based_options_create().?;
+            defer rdb.rocksdb_block_based_options_destroy(block_opts);
+
+            if (do.block_size) |size| {
+                rdb.rocksdb_block_based_options_set_block_size(block_opts, size);
+            }
+
+            if (do.block_cache) |cache_opts| {
+                const cache = rdb.rocksdb_cache_create_lru(cache_opts.size_bytes);
+                defer rdb.rocksdb_cache_destroy(cache);
+                rdb.rocksdb_block_based_options_set_block_cache(block_opts, cache);
+            }
+
+            rdb.rocksdb_options_set_block_based_table_factory(ro, block_opts);
+        }
 
         return ro;
     }
@@ -553,6 +578,11 @@ pub const CompressionOptions = struct {
     ///
     /// Default: 1
     parallel_threads: i32 = 1,
+};
+
+pub const BlockCacheOptions = struct {
+    /// Size of the block cache in bytes.
+    size_bytes: usize,
 };
 
 test "DB clean init and deinit" {
@@ -617,19 +647,85 @@ test "DBOptions custom" {
     try testDBOptions(subject, expected);
 }
 
+test "DBOptions with block_size" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .block_size = 8 * 1024,
+        },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    try db.put(null, "block_size_key", "block_size_value", .{}, &err_str);
+    const val = try db.get(null, "block_size_key", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+}
+
+test "DBOptions with block_cache" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .block_cache = .{ .size_bytes = 8 * 1024 * 1024 },
+        },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    try db.put(null, "block_cache_key", "block_cache_value", .{}, &err_str);
+    const val = try db.get(null, "block_cache_key", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+}
+
 fn testDBOptions(test_subject: DBOptions, expected: *rdb.struct_rocksdb_options_t) !void {
     const actual = test_subject.convert();
 
     inline for (@typeInfo(DBOptions).@"struct".fields) |field| {
-        // Only test fields that have C API getters
-        if (comptime !std.mem.eql(u8, field.name, "compression_opts") and
-            !std.mem.eql(u8, field.name, "enable_statistics"))
+        if (comptime std.mem.eql(u8, field.name, "block_cache") or
+            std.mem.eql(u8, field.name, "block_size"))
         {
-            const getter = "rocksdb_options_get_" ++ field.name;
-            const expected_value = @call(.auto, @field(rdb, getter), .{expected});
-            const actual_value = @call(.auto, @field(rdb, getter), .{actual});
-            try std.testing.expectEqual(expected_value, actual_value);
+            continue;
         }
+        const getter = "rocksdb_options_get_" ++ field.name;
+        const expected_value = @call(.auto, @field(rdb, getter), .{expected});
+        const actual_value = @call(.auto, @field(rdb, getter), .{actual});
+        try std.testing.expectEqual(expected_value, actual_value);
     }
 }
 
