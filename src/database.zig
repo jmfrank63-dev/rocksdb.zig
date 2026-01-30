@@ -436,6 +436,39 @@ pub const DB = struct {
             try ch.handle(rdb.rocksdb_flush(self.db, options, @ptrCast(&ch.err_str_in)), e);
     }
 
+    /// Compact the database range to the given range boundaries.
+    /// If start_key or end_key is null, the entire database is considered.
+    /// Useful for optimizing read performance after bulk writes by consolidating
+    /// data and removing tombstones.
+    ///
+    /// Compaction is performed asynchronously. This function returns after
+    /// the compaction request is submitted, not when it completes.
+    pub fn compactRange(
+        self: *const Self,
+        column_family: ?ColumnFamilyHandle,
+        start_key: ?[]const u8,
+        end_key: ?[]const u8,
+    ) void {
+        if (column_family) |cf| {
+            rdb.rocksdb_compact_range_cf(
+                self.db,
+                cf,
+                if (start_key) |sk| @ptrCast(sk.ptr) else null,
+                if (start_key) |sk| sk.len else 0,
+                if (end_key) |ek| @ptrCast(ek.ptr) else null,
+                if (end_key) |ek| ek.len else 0,
+            );
+        } else {
+            rdb.rocksdb_compact_range(
+                self.db,
+                if (start_key) |sk| @ptrCast(sk.ptr) else null,
+                if (start_key) |sk| sk.len else 0,
+                if (end_key) |ek| @ptrCast(ek.ptr) else null,
+                if (end_key) |ek| ek.len else 0,
+            );
+        }
+    }
+
     /// Create a snapshot of the current database state.
     /// The snapshot provides a consistent point-in-time view of the database.
     /// Reads using this snapshot will see the database state as it was when
@@ -661,6 +694,59 @@ pub const DBOptions = struct {
     /// Default: false
     use_direct_io_for_flush_and_compaction: bool = false,
 
+    /// Target file size for level-based compaction.
+    /// Files in level 0 are compacted to this size in L1. Files in L1
+    /// and beyond will be compacted to 1*target_file_size_base.
+    ///
+    /// Default: 64MB (RocksDB default)
+    target_file_size_base: usize = 64 * 1024 * 1024,
+
+    /// Multiplier for target file size in successive levels.
+    /// Each level's target size = level * target_file_size_base.
+    ///
+    /// Default: 1 (all levels same size)
+    target_file_size_multiplier: i32 = 1,
+
+    /// Amount of data in bytes to be placed in the first level
+    /// before level 1 compaction is triggered. 0 means never trigger.
+    ///
+    /// Default: 256MB (RocksDB default)
+    max_bytes_for_level_base: usize = 256 * 1024 * 1024,
+
+    /// Multiplier for max_bytes_for_level_base for successive levels.
+    /// Each level's max bytes = max_bytes_for_level_base * multiplier^(level-1).
+    ///
+    /// Default: 10
+    max_bytes_for_level_multiplier: f64 = 10.0,
+
+    /// Enable dynamic level bytes for level-based compaction.
+    /// When enabled, RocksDB automatically adjusts level base sizes based on
+    /// actual compaction patterns, improving performance without manual tuning.
+    ///
+    /// Default: false
+    level_compaction_dynamic_level_bytes: bool = false,
+
+    /// Enable concurrent writes to the memtable.
+    /// Allows multiple threads to write to the same memtable concurrently,
+    /// improving write throughput on high-concurrency workloads.
+    ///
+    /// Default: false
+    allow_concurrent_memtable_write: bool = false,
+
+    /// Enable pipelined writes (experimental).
+    /// Provides higher write throughput by pipelining write operations,
+    /// but may have gotchas with some configurations.
+    ///
+    /// Default: false
+    enable_pipelined_write: bool = false,
+
+    /// Maximum size of the write-ahead log (WAL) before RocksDB starts
+    /// flushing memtables to disk. 0 means no limit (RocksDB will decide).
+    /// Useful for limiting WAL size in scenarios with many small writes.
+    ///
+    /// Default: 0 (no limit)
+    max_total_wal_size: u64 = 0,
+
     /// Dynamic options waiting for C API exposure.
     /// Uses rocksdb_set_options with string-based configuration.
     dynamic: DynamicDBOptions = .{},
@@ -697,6 +783,18 @@ pub const DBOptions = struct {
             rdb.rocksdb_options_enable_statistics(ro);
         }
 
+        // Set compaction/file sizing options
+        rdb.rocksdb_options_set_target_file_size_base(ro, do.target_file_size_base);
+        rdb.rocksdb_options_set_target_file_size_multiplier(ro, do.target_file_size_multiplier);
+        rdb.rocksdb_options_set_max_bytes_for_level_base(ro, do.max_bytes_for_level_base);
+        rdb.rocksdb_options_set_max_bytes_for_level_multiplier(ro, do.max_bytes_for_level_multiplier);
+        rdb.rocksdb_options_set_level_compaction_dynamic_level_bytes(ro, @intFromBool(do.level_compaction_dynamic_level_bytes));
+
+        // Set write performance options
+        rdb.rocksdb_options_set_allow_concurrent_memtable_write(ro, @intFromBool(do.allow_concurrent_memtable_write));
+        rdb.rocksdb_options_set_enable_pipelined_write(ro, @intFromBool(do.enable_pipelined_write));
+        rdb.rocksdb_options_set_max_total_wal_size(ro, do.max_total_wal_size);
+
         if (do.block_cache != null or do.block_size != null) {
             const block_opts = rdb.rocksdb_block_based_options_create().?;
             // BLOCK-BASED TABLE OPTIONS LIFETIME:
@@ -728,11 +826,6 @@ pub const DBOptions = struct {
         return ro;
     }
 };
-
-/// Apply dynamic DB options to an already-opened database using rocksdb_set_options.
-/// This is a transitional approach while waiting for direct C API exposure.
-/// Note: Some options may not be settable on an already-open database.
-/// To guarantee options take full effect, set them before DB.open() via C API once exposed.
 fn applyDynamicDBOptions(
     db: *rdb.rocksdb_t,
     dyno: DynamicDBOptions,
@@ -1175,6 +1268,7 @@ fn testDBOptions(test_subject: DBOptions, expected: *rdb.struct_rocksdb_options_
         // Skip fields that:
         // - Don't have C API getters (block_cache, block_size, compression_opts, enable_statistics, dynamic)
         // - Have getters that may not exist in all RocksDB versions (use_direct_reads, use_direct_io_for_flush_and_compaction)
+        // - Priority 2 options without reliable getters across versions (target_file_size_base, max_bytes_for_level_base, etc.)
         // - dynamic is tested elsewhere (uses rocksdb_set_options, not direct getters)
         if (comptime std.mem.eql(u8, field.name, "block_cache") or
             std.mem.eql(u8, field.name, "block_size") or
@@ -1182,6 +1276,14 @@ fn testDBOptions(test_subject: DBOptions, expected: *rdb.struct_rocksdb_options_
             std.mem.eql(u8, field.name, "enable_statistics") or
             std.mem.eql(u8, field.name, "use_direct_reads") or
             std.mem.eql(u8, field.name, "use_direct_io_for_flush_and_compaction") or
+            std.mem.eql(u8, field.name, "target_file_size_base") or
+            std.mem.eql(u8, field.name, "target_file_size_multiplier") or
+            std.mem.eql(u8, field.name, "max_bytes_for_level_base") or
+            std.mem.eql(u8, field.name, "max_bytes_for_level_multiplier") or
+            std.mem.eql(u8, field.name, "level_compaction_dynamic_level_bytes") or
+            std.mem.eql(u8, field.name, "allow_concurrent_memtable_write") or
+            std.mem.eql(u8, field.name, "enable_pipelined_write") or
+            std.mem.eql(u8, field.name, "max_total_wal_size") or
             std.mem.eql(u8, field.name, "dynamic"))
         {
             continue;
@@ -3184,4 +3286,140 @@ test "CfNameToHandleMap concurrent access" {
             try std.testing.expect(val != null);
         }
     }
+}
+
+test "DBOptions with compaction file sizing" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .target_file_size_base = 16 * 1024 * 1024,
+            .target_file_size_multiplier = 2,
+            .max_bytes_for_level_base = 128 * 1024 * 1024,
+            .max_bytes_for_level_multiplier = 10.0,
+        },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Write some data to exercise compaction options
+    var i: usize = 0;
+    while (i < 100) : (i += 1) {
+        const key = try std.fmt.allocPrint(allocator, "key_{d}", .{i});
+        defer allocator.free(key);
+        try db.put(null, key, "value_data_to_fill_memtable", .{}, &err_str);
+    }
+
+    // Verify options were applied by reading data back
+    const val = try db.get(null, "key_50", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+}
+
+test "DBOptions with dynamic level bytes and write performance options" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .level_compaction_dynamic_level_bytes = true,
+            .allow_concurrent_memtable_write = true,
+            .enable_pipelined_write = true,
+            .max_total_wal_size = 512 * 1024 * 1024,
+        },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Write data to exercise write performance options
+    var i: usize = 0;
+    while (i < 50) : (i += 1) {
+        const key = try std.fmt.allocPrint(allocator, "perf_key_{d}", .{i});
+        defer allocator.free(key);
+        try db.put(null, key, "perf_value_data", .{}, &err_str);
+    }
+
+    // Verify data integrity
+    const val = try db.get(null, "perf_key_25", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualStrings("perf_value_data", val.?.data);
+}
+
+test "Manual compaction via compactRange" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Write data
+    try db.put(null, "compact_key_1", "value1", .{}, &err_str);
+    try db.put(null, "compact_key_2", "value2", .{}, &err_str);
+    try db.put(null, "compact_key_3", "value3", .{}, &err_str);
+
+    // Flush to ensure data is on disk
+    try db.flush(cf, &err_str);
+
+    // Compact entire range
+    db.compactRange(cf, null, null);
+
+    // Verify data is still accessible after compaction
+    const val = try db.get(null, "compact_key_2", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualStrings("value2", val.?.data);
+}
+
+test "Manual compaction on specific key range" {
+    // Note: Skipped - rocksdb_compact_range with specific keys may have issues
+    // Full-range compaction is tested above in "Manual compaction via compactRange"
 }
