@@ -15,7 +15,7 @@ The wrapper provides basic key-value operations with column families. It's suita
 - ✅ Basic metadata (liveFiles, properties)
 - ✅ DB.destroy: Delete database from filesystem
 - ✅ DBOptions: Core options + compaction/write performance tuning + block-based table options
-- ⏳ DynamicDBOptions: 2 options pending C API (max_manifest_space_amp_pct, target_file_size_is_upper_bound)
+- ⏳ DynamicDBOptions: 3 options pending C API (max_manifest_space_amp_pct, target_file_size_is_upper_bound, allow_trivial_move)
 - ✅ ReadOptions: 6 options (verify_checksums, fill_cache, tailing, readahead_size, snapshot, and defaults)
 - ⏳ DynamicReadOptions: 1 option pending C API (allow_unprepared_value - v9.8.0+)
 - ✅ WriteOptions: 3 options (sync, disable_WAL, low_pri)

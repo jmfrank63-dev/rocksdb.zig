@@ -50,7 +50,7 @@ const copyLen = lib.data.copyLen;
 // - block_based table options copying: documented C API behavior since v5.0
 //
 // TESTING:
-// - Comprehensive test coverage for all features
+// - Comprehensive test coverage for all features (see ROADMAP for current totals)
 // - testDBOptions skips fields without reliable C API getters across RocksDB versions
 //   (block_cache, block_size, compression_opts, enable_statistics, direct I/O flags)
 // - All options objects in tests properly destroyed via defer statements
@@ -872,10 +872,11 @@ fn applyDynamicDBOptions(
 ) (Allocator.Error || error{RocksDBSetOptions})!void {
     // Build dynamic options strings with NUL termination.
     // Keys are static NUL-terminated literals; only values need allocation.
-    var alloc_buffers: [3][]u8 = undefined; // Only values
+    const max_dynamic = 3;
+    var alloc_buffers: [max_dynamic][]u8 = undefined; // Only values
     var alloc_count: usize = 0;
-    var key_ptrs: [3][*c]const u8 = undefined;
-    var val_ptrs: [3][*c]const u8 = undefined;
+    var key_ptrs: [max_dynamic][*c]const u8 = undefined;
+    var val_ptrs: [max_dynamic][*c]const u8 = undefined;
     var count: usize = 0;
 
     defer {
@@ -952,8 +953,8 @@ fn applyDynamicDBOptions(
 /// Check if any dynamic DB options are set.
 fn hasDynamicDBOptions(dyno: DynamicDBOptions) bool {
     return dyno.max_manifest_space_amp_pct != null or
-    dyno.target_file_size_is_upper_bound != null or
-    dyno.allow_trivial_move != null;
+        dyno.target_file_size_is_upper_bound != null or
+        dyno.allow_trivial_move != null;
 }
 
 pub const Compression = enum(c_int) {
