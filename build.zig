@@ -125,6 +125,12 @@ fn addRocksDB(
 
     mod.addIncludePath(rocks_dep.path("include"));
     mod.linkLibrary(static_rocksdb);
+    
+    // If snappy is enabled, ensure it's also linked to the module
+    // so that tests and other consumers have access to snappy symbols
+    if (maybe_libsnappy) |libsnappy| {
+        mod.linkLibrary(libsnappy);
+    }
 
     return mod;
 }
