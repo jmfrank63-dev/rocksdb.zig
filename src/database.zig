@@ -546,7 +546,8 @@ pub const DBOptions = struct {
 
             if (do.block_cache) |cache_opts| {
                 const cache = rdb.rocksdb_cache_create_lru(cache_opts.size_bytes);
-                defer rdb.rocksdb_cache_destroy(cache);
+                // NOTE: Do not destroy the cache here - RocksDB takes ownership
+                // and will manage its lifetime internally
                 rdb.rocksdb_block_based_options_set_block_cache(block_opts, cache);
             }
 
