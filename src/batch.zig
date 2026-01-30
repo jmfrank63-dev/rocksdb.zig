@@ -64,3 +64,48 @@ pub const WriteBatch = struct {
         );
     }
 };
+
+test "WriteBatch put/delete" {
+    const database = @import("database.zig");
+    const allocator = std.testing.allocator;
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?lib.Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try database.DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true, .create_missing_column_families = true },
+        &.{.{ .name = "default" }},
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer allocator.free(families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    var batch = WriteBatch.init();
+    defer batch.deinit();
+    batch.put(cf, "a", "1");
+    batch.put(cf, "b", "2");
+    try db.write(batch, &err_str);
+
+    const val = try db.get(null, "a", &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expectEqualSlices(u8, "1", val.?.data);
+
+    var delete_batch = WriteBatch.init();
+    defer delete_batch.deinit();
+    delete_batch.delete(cf, "a");
+    try db.write(delete_batch, &err_str);
+
+    const after_delete = try db.get(null, "a", &err_str);
+    try std.testing.expect(after_delete == null);
+}

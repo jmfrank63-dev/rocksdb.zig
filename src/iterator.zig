@@ -155,3 +155,49 @@ pub const RawIterator = struct {
         }
     }
 };
+
+test "RawIterator seek and bounds" {
+    const database = @import("database.zig");
+    const allocator = std.testing.allocator;
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?lib.Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try database.DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true, .create_missing_column_families = true },
+        &.{.{ .name = "default" }},
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer allocator.free(families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    try db.put(null, "a", "1", &err_str);
+    try db.put(null, "b", "2", &err_str);
+    try db.put(null, "c", "3", &err_str);
+
+    var raw = db.rawIterator(null);
+    defer raw.deinit();
+
+    raw.seekToFirst();
+    var key = raw.key().?;
+    try std.testing.expectEqualSlices(u8, "a", key.data);
+
+    raw.seekToLast();
+    key = raw.key().?;
+    try std.testing.expectEqualSlices(u8, "c", key.data);
+
+    raw.seek("b");
+    key = raw.key().?;
+    try std.testing.expectEqualSlices(u8, "b", key.data);
+}

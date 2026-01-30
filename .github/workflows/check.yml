@@ -38,3 +38,17 @@ jobs:
       - name: test
         run: |
           zig build test
+
+      - name: test C-API-only static
+        run: |
+          zig build -Denable_c_api_static=true
+
+      - name: test C-API-only shared (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          zig build -Denable_c_api_shared=true
+
+      - name: test with snappy (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          zig build -Denable_snappy=true test
