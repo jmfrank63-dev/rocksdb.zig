@@ -2,7 +2,7 @@
 
 ## Build Dependencies
 
-`rocksdb-zig` is pinned to [Zig `0.15`](https://ziglang.org/download/), so you will need to have it installed.
+`rocksdb-zig` is pinned to [Zig `0.15`](https://ziglang.org/download/) and uses [RocksDB `10.9.1`](https://github.com/facebook/rocksdb/releases/tag/v10.9.1).
 
 ## Usage
 
@@ -23,37 +23,52 @@ You can use this with any language or build system.
 
 ### Build variants and flags
 
-Default build (full C++ API, static):
+#### Default build (full C++ API, static)
 
 ```bash
 zig build
 ```
 
-C-API-only static library:
+Includes all RocksDB C++ APIs. Produces `zig-out/lib/librocksdb.a` on non-Windows or `zig-out/lib/rocksdb.lib` on Windows.
+
+#### C-API-only static library
 
 ```bash
 zig build -Denable_c_api_static=true
 ```
 
-Shared library (non-Windows):
+Builds a static library exposing only the C API (from `rocksdb/c.h`). This produces a smaller library and reduces final executable size compared to the full C++ API build. Useful when you only need the C API or are concerned about binary size.
+
+#### Shared library (non-Windows)
 
 ```bash
 zig build
 ```
 
-Shared library on Windows (C-API-only):
+On Linux/macOS, both static and shared libraries are built by default. The shared library includes the full C++ API.
+
+#### Shared library on Windows (C-API-only)
 
 ```bash
 zig build -Denable_c_api_shared=true
 ```
 
-ReleaseFast builds:
+On Windows, only the C API can be exported to a DLL due to symbol export limits. See the Windows shared library note below for details.
+
+#### ReleaseFast builds
+
+Add `--release=fast` to any build command for optimized release builds:
 
 ```bash
-zig build -Doptimize=ReleaseFast
-zig build -Doptimize=ReleaseFast -Denable_c_api_static=true
-zig build -Doptimize=ReleaseFast -Denable_c_api_shared=true
+zig build --release=fast
+zig build --release=fast -Denable_c_api_static=true
+zig build --release=fast -Denable_c_api_shared=true
 ```
+
+#### Additional options
+
+- `-Denable_snappy=true` - Enable Snappy compression support
+- `-Dforce_pic=true` - Force position-independent code for libraries
 
 ### Windows shared library note
 
