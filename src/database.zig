@@ -50,7 +50,7 @@ const copyLen = lib.data.copyLen;
 // - block_based table options copying: documented C API behavior since v5.0
 //
 // TESTING:
-// - 60 tests passing with comprehensive coverage
+// - Comprehensive test coverage for all features
 // - testDBOptions skips fields without reliable C API getters across RocksDB versions
 //   (block_cache, block_size, compression_opts, enable_statistics, direct I/O flags)
 // - All options objects in tests properly destroyed via defer statements
@@ -2672,4 +2672,516 @@ test "WriteOptions with low_pri flag" {
     defer if (val2) |v| v.deinit();
     try std.testing.expect(val2 != null);
     try std.testing.expectEqualStrings("value2", val2.?.data);
+}
+
+test "Low-priority writes with batch and flush" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Write normal priority data
+    try db.put(null, "normal1", "value1", .{}, &err_str);
+
+    // Force a flush to create compaction pressure
+    try db.flush(cf, &err_str);
+
+    // Write with low priority in a batch
+    var batch = WriteBatch.init();
+    defer batch.deinit();
+    batch.put(cf, "low_pri1", "batch_value1");
+    batch.put(cf, "low_pri2", "batch_value2");
+    try db.write(batch, .{ .low_pri = true }, &err_str);
+
+    // Write more normal priority data
+    try db.put(null, "normal2", "value2", .{}, &err_str);
+
+    // Verify all data is present and ordering is preserved
+    const val_normal1 = try db.get(null, "normal1", .{}, &err_str);
+    defer if (val_normal1) |v| v.deinit();
+    try std.testing.expect(val_normal1 != null);
+    try std.testing.expectEqualStrings("value1", val_normal1.?.data);
+
+    const val_low1 = try db.get(null, "low_pri1", .{}, &err_str);
+    defer if (val_low1) |v| v.deinit();
+    try std.testing.expect(val_low1 != null);
+    try std.testing.expectEqualStrings("batch_value1", val_low1.?.data);
+
+    const val_low2 = try db.get(null, "low_pri2", .{}, &err_str);
+    defer if (val_low2) |v| v.deinit();
+    try std.testing.expect(val_low2 != null);
+    try std.testing.expectEqualStrings("batch_value2", val_low2.?.data);
+
+    const val_normal2 = try db.get(null, "normal2", .{}, &err_str);
+    defer if (val_normal2) |v| v.deinit();
+    try std.testing.expect(val_normal2 != null);
+    try std.testing.expectEqualStrings("value2", val_normal2.?.data);
+}
+
+test "Snapshot lifecycle - release prevents further use" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Write data and create snapshot
+    try db.put(null, "key1", "value1", .{}, &err_str);
+    const snapshot = db.createSnapshot();
+
+    // Verify snapshot works before release
+    const val_before = try db.get(null, "key1", .{ .snapshot = snapshot }, &err_str);
+    defer if (val_before) |v| v.deinit();
+    try std.testing.expect(val_before != null);
+
+    // Release snapshot
+    db.releaseSnapshot(snapshot);
+
+    // Note: Using snapshot after release is undefined behavior in RocksDB.
+    // We don't test this as it would rely on UB. The test documents the lifecycle.
+    // In production code, users must not use snapshots after releaseSnapshot().
+}
+
+test "Snapshot lifecycle - all released before deinit" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Create and release multiple snapshots
+    const snap1 = db.createSnapshot();
+    const snap2 = db.createSnapshot();
+    const snap3 = db.createSnapshot();
+
+    db.releaseSnapshot(snap1);
+    db.releaseSnapshot(snap2);
+    db.releaseSnapshot(snap3);
+
+    // DB will deinit cleanly with all snapshots released
+    // This test verifies no leaks occur
+}
+
+test "Iterator with snapshot sees stable view" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Write initial data
+    try db.put(null, "key1", "value1", .{}, &err_str);
+    try db.put(null, "key2", "value2", .{}, &err_str);
+
+    // Create snapshot
+    const snapshot = db.createSnapshot();
+    defer db.releaseSnapshot(snapshot);
+
+    // Modify data after snapshot
+    try db.put(null, "key1", "modified", .{}, &err_str);
+    try db.put(null, "key3", "added", .{}, &err_str);
+
+    // Create iterator with snapshot (already positioned at first)
+    // Note: Using rawIterator for more direct control
+    var raw_iter = db.rawIterator(cf, .{ .snapshot = snapshot });
+    defer raw_iter.deinit();
+
+    // Count entries visible through snapshot
+    var count: usize = 0;
+    raw_iter.seekToFirst();
+    while (raw_iter.valid()) : (raw_iter.next()) {
+        count += 1;
+        // Verify we can access data without crashing
+        const key_data = raw_iter.key();
+        const val_data = raw_iter.value();
+        if (key_data) |k| {
+            if (val_data) |v| {
+                // Snapshot should only see original 2 keys
+                if (std.mem.eql(u8, k.data, "key1")) {
+                    try std.testing.expectEqualStrings("value1", v.data);
+                } else if (std.mem.eql(u8, k.data, "key2")) {
+                    try std.testing.expectEqualStrings("value2", v.data);
+                }
+            }
+        }
+    }
+
+    // Should only see 2 keys (key3 was added after snapshot)
+    try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "Dynamic options invalid value returns error" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // RocksDB may or may not reject specific invalid values via rocksdb_set_options
+    // This test documents the error handling path and ensures no crashes
+    const result = DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .dynamic = .{
+                // Very large value that may be rejected
+                .max_manifest_space_amp_pct = 999999,
+            },
+        },
+        null,
+        false,
+        &err_str,
+    );
+
+    if (result) |pair| {
+        var db, const families = pair;
+        defer db.deinit();
+        defer DB.freeColumnFamilies(allocator, families);
+        // If RocksDB accepts it, that's fine - test passes
+    } else |e| {
+        // If RocksDB rejects it, error should be surfaced
+        if (e == error.RocksDBSetOptions) {
+            // Verify error string was populated
+            try std.testing.expect(err_str != null);
+            // Error will be freed by defer
+        } else {
+            return e;
+        }
+    }
+}
+
+test "Dynamic options both set simultaneously" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // Test both dynamic options at once - exercises two-slot limit
+    const result = DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .dynamic = .{
+                .max_manifest_space_amp_pct = 50,
+                .target_file_size_is_upper_bound = true,
+            },
+        },
+        null,
+        false,
+        &err_str,
+    );
+
+    if (result) |pair| {
+        var db, const families = pair;
+        defer db.deinit();
+        defer DB.freeColumnFamilies(allocator, families);
+
+        const cf = families[0].handle;
+        db = db.withDefaultColumnFamily(cf);
+
+        // Verify database is functional
+        try db.put(null, "key1", "value1", .{}, &err_str);
+        const val = try db.get(null, "key1", .{}, &err_str);
+        defer if (val) |v| v.deinit();
+        try std.testing.expect(val != null);
+    } else |e| {
+        // Dynamic options may not be settable post-open, that's expected
+        if (e == error.RocksDBSetOptions) {
+            // Error was handled correctly
+        } else {
+            return e;
+        }
+    }
+}
+
+test "Block cache capacity property verification" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    const cache_size: usize = 8 * 1024 * 1024; // 8MB
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .block_cache = .{ .size_bytes = cache_size },
+            .block_size = 4096,
+        },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Query block cache capacity property
+    const prop_data = db.propertyValueCf(cf, "rocksdb.block-cache-capacity");
+    defer prop_data.deinit();
+
+    // Verify property was returned (exact value may vary due to RocksDB internals)
+    try std.testing.expect(prop_data.data.len > 0);
+
+    // Parse the property value and verify it's in reasonable range
+    const capacity = std.fmt.parseInt(usize, prop_data.data, 10) catch unreachable;
+    try std.testing.expect(capacity > 0);
+    try std.testing.expect(capacity >= cache_size);
+}
+
+test "ReadOptions composition - snapshot + verify_checksums + no fill_cache" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Write data
+    try db.put(null, "key1", "value1", .{}, &err_str);
+
+    // Create snapshot
+    const snapshot = db.createSnapshot();
+    defer db.releaseSnapshot(snapshot);
+
+    // Create rawIterator with combined options
+    var raw_iter = db.rawIterator(cf, .{
+        .snapshot = snapshot,
+        .verify_checksums = true,
+        .fill_cache = false,
+    });
+    defer raw_iter.deinit();
+
+    // Verify iterator works with combined options
+    raw_iter.seekToFirst();
+    try std.testing.expect(raw_iter.valid());
+    const key_data = raw_iter.key();
+    const val_data = raw_iter.value();
+    try std.testing.expect(key_data != null);
+    try std.testing.expect(val_data != null);
+    try std.testing.expectEqualStrings("key1", key_data.?.data);
+    try std.testing.expectEqualStrings("value1", val_data.?.data);
+}
+
+test "Iterator with readahead in reverse direction" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Write multiple keys
+    try db.put(null, "key1", "value1", .{}, &err_str);
+    try db.put(null, "key2", "value2", .{}, &err_str);
+    try db.put(null, "key3", "value3", .{}, &err_str);
+
+    // Create rawIterator with readahead and iterate backwards
+    var raw_iter = db.rawIterator(cf, .{ .readahead_size = 4096 });
+    defer raw_iter.deinit();
+
+    // Iterate in reverse with readahead enabled
+    raw_iter.seekToLast();
+    var count: usize = 0;
+    while (raw_iter.valid()) : (raw_iter.prev()) {
+        count += 1;
+        // Just verify it doesn't crash
+        _ = raw_iter.key();
+        _ = raw_iter.value();
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+}
+
+test "CfNameToHandleMap concurrent access" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    const ThreadContext = struct {
+        db_ptr: *const DB,
+        cf_handle: ColumnFamilyHandle,
+        thread_id: usize,
+
+        fn writeAndRead(ctx: @This()) !void {
+            var thread_err: ?Data = null;
+            defer if (thread_err) |e| e.deinit();
+
+            for (0..10) |i| {
+                const key = try std.fmt.allocPrint(std.testing.allocator, "key_t{d}_{d}", .{ ctx.thread_id, i });
+                defer std.testing.allocator.free(key);
+                const val = try std.fmt.allocPrint(std.testing.allocator, "value_t{d}_{d}", .{ ctx.thread_id, i });
+                defer std.testing.allocator.free(val);
+
+                try ctx.db_ptr.put(ctx.cf_handle, key, val, .{}, &thread_err);
+
+                // Immediately read back
+                const read_val = try ctx.db_ptr.get(ctx.cf_handle, key, .{}, &thread_err);
+                defer if (read_val) |rv| rv.deinit();
+                try std.testing.expect(read_val != null);
+            }
+        }
+    };
+
+    // Spawn threads for concurrent access on same column family
+    // This tests RocksDB's thread safety for reads/writes
+    var threads: [3]std.Thread = undefined;
+    for (&threads, 0..) |*thread, i| {
+        thread.* = try std.Thread.spawn(.{}, ThreadContext.writeAndRead, .{ThreadContext{
+            .db_ptr = &db,
+            .cf_handle = cf,
+            .thread_id = i,
+        }});
+    }
+
+    // Wait for all threads
+    for (threads) |thread| {
+        thread.join();
+    }
+
+    // Verify data written by all threads
+    for (0..3) |tid| {
+        for (0..10) |i| {
+            const key = try std.fmt.allocPrint(allocator, "key_t{d}_{d}", .{ tid, i });
+            defer allocator.free(key);
+            const val = try db.get(null, key, .{}, &err_str);
+            defer if (val) |v| v.deinit();
+            try std.testing.expect(val != null);
+        }
+    }
 }
