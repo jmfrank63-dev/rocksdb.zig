@@ -7,6 +7,7 @@ pub const ColumnFamilyDescription = database.ColumnFamilyDescription;
 pub const ColumnFamilyHandle = database.ColumnFamilyHandle;
 pub const ColumnFamilyOptions = database.ColumnFamilyOptions;
 pub const Compression = database.Compression;
+pub const CompressionOptions = database.CompressionOptions;
 pub const DB = database.DB;
 pub const DBOptions = database.DBOptions;
 pub const LiveFile = database.LiveFile;
