@@ -530,7 +530,6 @@ fn buildRocksDB(
         const flags = .{
             "-std=c++11",
             "-fno-exceptions",
-            "-fno-rtti",
             "-Wno-sign-compare",
         };
 
