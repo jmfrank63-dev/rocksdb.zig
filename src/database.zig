@@ -932,6 +932,7 @@ test "DBOptions with statistics disabled" {
 
 fn testDBOptions(test_subject: DBOptions, expected: *rdb.struct_rocksdb_options_t) !void {
     const actual = test_subject.convert();
+    defer rdb.rocksdb_options_destroy(actual);
 
     inline for (@typeInfo(DBOptions).@"struct".fields) |field| {
         if (comptime std.mem.eql(u8, field.name, "block_cache") or
@@ -1026,6 +1027,17 @@ const CallHandler = struct {
 };
 
 const CfNameToHandleMap = struct {
+    /// Thread-safe map of column family names to handles.
+    ///
+    /// OWNERSHIP SEMANTICS:
+    /// - The map OWNS all column family handles and destroys them on map destruction
+    /// - Callers MUST NOT manually destroy handles obtained from this map
+    /// - Handles are returned to callers for convenience, but ownership remains with the map
+    /// - Names are owned by the map if created via put(), or external if created via putUnowned()
+    ///
+    /// SAFETY:
+    /// - All operations are protected by a reader-writer lock
+    /// - Handles must not be used after the map is destroyed (i.e., after db.deinit())
     allocator: Allocator,
     map: std.StringHashMapUnmanaged(ColumnFamilyHandle),
     owned_names: std.StringHashMapUnmanaged(void), // Track which names we own
@@ -1047,6 +1059,7 @@ const CfNameToHandleMap = struct {
     fn destroy(self: *Self) void {
         var iter = self.map.iterator();
         while (iter.next()) |entry| {
+            // Destroy all handles (map owns them)
             rdb.rocksdb_column_family_handle_destroy(entry.value_ptr.*);
             // Only free names we own
             if (self.owned_names.contains(entry.key_ptr.*)) {
@@ -1610,8 +1623,9 @@ test "Flag: LiveFile retrieval without ordering assumptions" {
 // - CfNameToHandleMap.put propagates allocation errors with proper locking (test: "CfNameToHandleMap.put allocation failure")
 // - rawIterator now keeps read_options alive for iterator lifetime (prevents use-after-free)
 // - DB.open now uses cf_map.put with error propagation instead of direct map.put
-//
-// TODO: destroy() needs proper implementation with path parameter
+// - DB.destroy() fully implemented with rocksdb_destroy_db (test: "DB.destroy removes database")
+// - Block cache lifetime fixed: cache not destroyed immediately after attachment
+// - compression_opts and enable_statistics now fully wired through RocksDB C API
 
 test "Cleanup: Options are properly destroyed" {
     // This test documents the memory leak where DBOptions.convert()
