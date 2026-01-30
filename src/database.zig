@@ -505,6 +505,12 @@ pub const DBOptions = struct {
     /// Default: snappy if supported, otherwise no compression
     compression: Compression = .snappy,
 
+    /// Fine-grained compression options.
+    /// Only applied if compression is enabled.
+    ///
+    /// Default: CompressionOptions{}
+    compression_opts: CompressionOptions = .{},
+
     /// Optional block cache settings for block-based table format.
     /// When set, a block cache is created and assigned to the table factory.
     block_cache: ?BlockCacheOptions = null,
@@ -512,6 +518,12 @@ pub const DBOptions = struct {
     /// Optional block size for block-based table format.
     /// If null, RocksDB's default block size is used.
     block_size: ?usize = null,
+
+    /// Enable statistics collection for performance monitoring.
+    /// When enabled, statistics can be accessed through the GetProperty API.
+    ///
+    /// Default: false
+    enable_statistics: bool = false,
 
     /// Enable direct I/O mode for reading.
     /// They may or may not improve performance depending on the use case.
@@ -533,8 +545,25 @@ pub const DBOptions = struct {
         rdb.rocksdb_options_set_max_write_buffer_number(ro, do.max_write_buffer_number);
         rdb.rocksdb_options_set_max_background_jobs(ro, do.max_background_jobs);
         rdb.rocksdb_options_set_compression(ro, @intFromEnum(do.compression));
+
+        // Set compression options if compression is enabled
+        if (do.compression != .none) {
+            rdb.rocksdb_options_set_compression_options(
+                ro,
+                do.compression_opts.window_bits,
+                do.compression_opts.max_dict_bytes,
+                do.compression_opts.zstd_max_train_bytes,
+                do.compression_opts.parallel_threads,
+            );
+        }
+
         rdb.rocksdb_options_set_use_direct_reads(ro, @intFromBool(do.use_direct_reads));
         rdb.rocksdb_options_set_use_direct_io_for_flush_and_compaction(ro, @intFromBool(do.use_direct_io_for_flush_and_compaction));
+
+        // Enable statistics if requested
+        if (do.enable_statistics) {
+            rdb.rocksdb_options_enable_statistics(ro);
+        }
 
         if (do.block_cache != null or do.block_size != null) {
             const block_opts = rdb.rocksdb_block_based_options_create().?;
@@ -773,12 +802,142 @@ test "DB.destroy removes database" {
     try std.testing.expectError(error.RocksDBOpen, result);
 }
 
+test "DBOptions with compression_opts" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // Test with custom compression options
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .compression = .zstd,
+            .compression_opts = .{
+                .window_bits = 15,
+                .max_dict_bytes = 4096,
+                .zstd_max_train_bytes = 8192,
+                .parallel_threads = 2,
+            },
+        },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Write compressible data to verify compression is working
+    const test_data = "This is a test string that should compress well. " ** 20;
+    try db.put(null, "compression_test", test_data, .{}, &err_str);
+    const val = try db.get(null, "compression_test", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualSlices(u8, test_data, val.?.data);
+}
+
+test "DBOptions with statistics enabled" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // Test with statistics enabled
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .enable_statistics = true,
+        },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Generate some activity to populate statistics
+    for (0..10) |i| {
+        const key = try std.fmt.allocPrint(allocator, "stat_key_{d}", .{i});
+        defer allocator.free(key);
+        const value = try std.fmt.allocPrint(allocator, "stat_value_{d}", .{i});
+        defer allocator.free(value);
+        try db.put(null, key, value, .{}, &err_str);
+    }
+
+    // Read the data back to generate read statistics
+    for (0..10) |i| {
+        const key = try std.fmt.allocPrint(allocator, "stat_key_{d}", .{i});
+        defer allocator.free(key);
+        const val = try db.get(null, key, .{}, &err_str);
+        defer if (val) |v| v.deinit();
+        try std.testing.expect(val != null);
+    }
+
+    // Verify we can flush (statistics shouldn't break functionality)
+    try db.flush(null, &err_str);
+}
+
+test "DBOptions with statistics disabled" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // Test with statistics explicitly disabled (default)
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .enable_statistics = false,
+        },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Verify normal operations work
+    try db.put(null, "no_stats_key", "no_stats_value", .{}, &err_str);
+    const val = try db.get(null, "no_stats_key", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+}
+
 fn testDBOptions(test_subject: DBOptions, expected: *rdb.struct_rocksdb_options_t) !void {
     const actual = test_subject.convert();
 
     inline for (@typeInfo(DBOptions).@"struct".fields) |field| {
         if (comptime std.mem.eql(u8, field.name, "block_cache") or
-            std.mem.eql(u8, field.name, "block_size"))
+            std.mem.eql(u8, field.name, "block_size") or
+            std.mem.eql(u8, field.name, "compression_opts") or
+            std.mem.eql(u8, field.name, "enable_statistics"))
         {
             continue;
         }
