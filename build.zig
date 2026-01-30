@@ -111,15 +111,16 @@ fn addRocksDB(
         static_rocksdb.root_module.addCMacro("ROCKSDB_LIBRARY_EXPORTS", "");
     }
 
-    try buildRocksDB(b, static_rocksdb, maybe_libsnappy, target);
+    try buildRocksDB(b, static_rocksdb, maybe_libsnappy, target, enable_c_api_static);
     if (dynamic_rocksdb) |dyn| {
-        if (enable_c_api_shared or target.result.os.tag == .windows) {
+        const dyn_is_c_api_only = enable_c_api_shared or target.result.os.tag == .windows;
+        if (dyn_is_c_api_only) {
             // Export only the C API symbols (c.h) to avoid the DLL export limit.
             dyn.dll_export_fns = false;
             dyn.root_module.addCMacro("ROCKSDB_DLL", "");
             dyn.root_module.addCMacro("ROCKSDB_LIBRARY_EXPORTS", "");
         }
-        try buildRocksDB(b, dyn, maybe_libsnappy, target);
+        try buildRocksDB(b, dyn, maybe_libsnappy, target, dyn_is_c_api_only);
     }
 
     mod.addIncludePath(rocks_dep.path("include"));
@@ -134,6 +135,7 @@ fn buildRocksDB(
     librocksdb: *std.Build.Step.Compile,
     maybe_libsnappy: ?*std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
+    c_api_only: bool,
 ) !void {
     const t = target.result;
     const rocks_dep = b.dependency("rocksdb", .{});
@@ -375,13 +377,6 @@ fn buildRocksDB(
             "test_util/sync_point_impl.cc",
             "test_util/testutil.cc",
             "test_util/transaction_test_util.cc",
-            "tools/block_cache_analyzer/block_cache_trace_analyzer.cc",
-            "tools/dump/db_dump_tool.cc",
-            "tools/io_tracer_parser_tool.cc",
-            "tools/ldb_cmd.cc",
-            "tools/ldb_tool.cc",
-            "tools/sst_dump_tool.cc",
-            "tools/trace_analyzer_tool.cc",
             "trace_replay/block_cache_tracer.cc",
             "trace_replay/io_tracer.cc",
             "trace_replay/trace_record_handler.cc",
@@ -498,6 +493,24 @@ fn buildRocksDB(
         },
         .flags = rocksdb_flags.items,
     });
+
+    // Tools are excluded for C-API-only builds to avoid linker errors
+    // from missing stress test symbols (DbStressCustomCompressionManager)
+    if (!c_api_only) {
+        librocksdb.addCSourceFiles(.{
+            .root = rocks_dep.path("."),
+            .files = &.{
+                "tools/block_cache_analyzer/block_cache_trace_analyzer.cc",
+                "tools/dump/db_dump_tool.cc",
+                "tools/io_tracer_parser_tool.cc",
+                "tools/ldb_cmd.cc",
+                "tools/ldb_tool.cc",
+                "tools/sst_dump_tool.cc",
+                "tools/trace_analyzer_tool.cc",
+            },
+            .flags = rocksdb_flags.items,
+        });
+    }
 
     if (maybe_libsnappy) |libsnappy| not_yet_fetched: {
         const snappy_dep = b.lazyDependency("snappy", .{}) orelse
