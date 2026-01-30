@@ -9,8 +9,8 @@
 Supported use cases:
 
 - [⬇️](#build-rocksdb) Build a RocksDB static library using the zig build system.
-- [⬇️](#import-rocksdb-c-api-in-the-zig-build-system) Use the RocksDB C API through auto-generated Zig bindings.
-- [⬇️](#import-the-zig-bindings-library-using-the-zig-build-system) Import an idiomatic zig library of bindings that wrap the RocksDB library with hand-written zig code.
+- [⬇️](#import-rocksdb-in-your-zig-project) Use the RocksDB C API through auto-generated Zig bindings.
+- [⬇️](#import-rocksdb-in-your-zig-project) Import an idiomatic zig library of bindings that wrap the RocksDB library with hand-written zig code.
 
 ## Build RocksDB
 
