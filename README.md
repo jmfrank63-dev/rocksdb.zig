@@ -76,43 +76,29 @@ On Windows, only the C API can be built as a shared library. This is a known
 RocksDB limitation due to the DLL export symbol limit. See
 <https://github.com/facebook/rocksdb/issues/981> for details.
 
-## Import RocksDB C API in the Zig Build System
+## Import RocksDB in your Zig Project
 
-Fetch `rocksdb` and save it to your `build.zig.zon`:
+Fetch `rocksdb-zig` and save it to your `build.zig.zon`:
 
 ```bash
 zig fetch --save=rocksdb https://github.com/Syndica/rocksdb-zig/archive/<COMMIT_HASH>.tar.gz
 ```
 
-Add the import to a module:
+Add the import to a module in your `build.zig`:
 
 ```zig
-const rocksdb = b.dependency("rocksdb", .{}).module("rocksdb");
+// Choose ONE of the following:
+
+// Option 1 (RECOMMENDED): Idiomatic Zig bindings with error handling and RAII
+const rocksdb = b.dependency("rocksdb", .{}).module("bindings");
+
+// Option 2: Raw C API bindings (auto-generated from rocksdb/c.h)
+// const rocksdb = b.dependency("rocksdb", .{}).module("rocksdb");
+
 exe.root_module.addImport("rocksdb", rocksdb);
 ```
 
-Import the `rocksdb` module.
-
-```zig
-const rocksdb = @import("rocksdb");
-```
-
-## Import the Zig bindings library using the Zig Build System
-
-Fetch `rocksdb` and save it to your `build.zig.zon`:
-
-```bash
-zig fetch --save=rocksdb https://github.com/Syndica/rocksdb-zig/archive/<COMMIT_HASH>.tar.gz
-```
-
-Add the import to a module:
-
-```zig
-const bindings = b.dependency("rocksdb", .{}).module("bindings");
-exe.root_module.addImport("rocksdb", bindings);
-```
-
-Import the `rocksdb` module.
+Then import the module in your code:
 
 ```zig
 const rocksdb = @import("rocksdb");
