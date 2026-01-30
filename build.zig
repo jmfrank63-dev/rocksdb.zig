@@ -52,8 +52,19 @@ fn addRocksDB(
     });
 
     const force_pic = b.option(bool, "force_pic", "Forces PIC enabled for the libraries");
+    const enable_c_api_static = b.option(
+        bool,
+        "enable_c_api_static",
+        "Build a C-API-only static library (no C++ API)",
+    ) orelse false;
+    const enable_c_api_shared = b.option(
+        bool,
+        "enable_c_api_shared",
+        "Build a C-API-only shared library (avoids Windows export limit)",
+    ) orelse false;
+
     const static_rocksdb = b.addLibrary(.{
-        .name = "rocksdb",
+        .name = if (enable_c_api_static) "rocksdb_c_api" else "rocksdb",
         .linkage = .static,
         .root_module = b.createModule(.{
             .target = target,
@@ -61,17 +72,28 @@ fn addRocksDB(
             .pic = if (force_pic == true) true else null,
         }),
     });
-    // Windows DLLs have a 65535 symbol export limit, but RocksDB exports ~80k symbols
-    // So we only build the shared library on non-Windows platforms
-    const dynamic_rocksdb = if (target.result.os.tag != .windows) b.addLibrary(.{
-        .name = "rocksdb_shared",
-        .linkage = .dynamic,
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-            .pic = if (force_pic == true) true else null,
-        }),
-    }) else null;
+    // Windows DLLs have a 65535 symbol export limit, but RocksDB exports ~80k symbols.
+    // By default we skip the shared library on Windows. You can opt in to a C-API-only DLL.
+    const dynamic_rocksdb = if (target.result.os.tag == .windows)
+        (if (enable_c_api_shared) b.addLibrary(.{
+            .name = "rocksdb_shared",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .pic = if (force_pic == true) true else null,
+            }),
+        }) else null)
+    else
+        b.addLibrary(.{
+            .name = "rocksdb_shared",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .pic = if (force_pic == true) true else null,
+            }),
+        });
 
     const maybe_libsnappy = if (enable_snappy) b.addLibrary(.{
         .name = "snappy",
@@ -83,8 +105,20 @@ fn addRocksDB(
         }),
     }) else null;
 
+    if (enable_c_api_static) {
+        // C-API-only static library: disable C++ and export symbols
+        static_rocksdb.root_module.addCMacro("ROCKSDB_DLL", "");
+        static_rocksdb.root_module.addCMacro("ROCKSDB_LIBRARY_EXPORTS", "");
+    }
+
     try buildRocksDB(b, static_rocksdb, maybe_libsnappy, target);
     if (dynamic_rocksdb) |dyn| {
+        if (enable_c_api_shared or target.result.os.tag == .windows) {
+            // Export only the C API symbols (c.h) to avoid the DLL export limit.
+            dyn.dll_export_fns = false;
+            dyn.root_module.addCMacro("ROCKSDB_DLL", "");
+            dyn.root_module.addCMacro("ROCKSDB_LIBRARY_EXPORTS", "");
+        }
         try buildRocksDB(b, dyn, maybe_libsnappy, target);
     }
 
