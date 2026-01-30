@@ -13,20 +13,22 @@ The wrapper provides basic key-value operations with column families. It's suita
 - ✅ Iterators (forward/reverse)
 - ✅ Write batches
 - ✅ Basic metadata (liveFiles, properties)
-- ✅ Minimal options (3 options exposed)
+- ✅ DBOptions: 9 options (create_if_missing, create_missing_column_families, max_open_files, write_buffer_size, max_write_buffer_number, max_background_jobs, compression, use_direct_reads, use_direct_io_for_flush_and_compaction)
+- ✅ ReadOptions: 5 options (verify_checksums, fill_cache, tailing, readahead_size, and defaults)
+- ✅ WriteOptions: 2 options (sync, disable_WAL)
 
 ## Priority 1: Critical Options & Configuration
 
 ### DBOptions Expansion
 
-- [ ] `write_buffer_size` - Memory budget for writes
-- [ ] `max_write_buffer_number` - Number of memtables
-- [ ] `compression` - Compression type (none, snappy, zstd, lz4)
+- [x] `write_buffer_size` - Memory budget for writes
+- [x] `max_write_buffer_number` - Number of memtables
+- [x] `compression` - Compression type (none, snappy, zstd, lz4)
 - [ ] `compression_opts` - Compression level settings
 - [ ] `block_cache` - LRU/LFU cache configuration
 - [ ] `block_size` - SST block size
-- [ ] `max_background_jobs` - Parallel compaction/flush threads
-- [ ] `use_direct_reads` / `use_direct_io_for_flush_and_compaction` - Direct I/O
+- [x] `max_background_jobs` - Parallel compaction/flush threads
+- [x] `use_direct_reads` / `use_direct_io_for_flush_and_compaction` - Direct I/O
 - [ ] `statistics` - Performance monitoring
 
 ### New v10.9.1 Options
@@ -37,15 +39,15 @@ The wrapper provides basic key-value operations with column families. It's suita
 
 ### ReadOptions
 
-- [ ] `verify_checksums` - Data integrity checking
-- [ ] `fill_cache` - Block cache population control
+- [x] `verify_checksums` - Data integrity checking
+- [x] `fill_cache` - Block cache population control
 - [ ] `snapshot` - Point-in-time reads
-- [ ] `readahead_size` - Prefetch optimization
+- [x] `readahead_size` - Prefetch optimization
 
 ### WriteOptions
 
-- [ ] `sync` - Force fsync for durability
-- [ ] `disable_WAL` - Skip write-ahead log
+- [x] `sync` - Force fsync for durability
+- [x] `disable_WAL` - Skip write-ahead log
 - [ ] `low_pri` - Low priority writes
 
 ## Priority 2: Performance Features
