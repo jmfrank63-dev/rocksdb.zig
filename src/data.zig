@@ -14,11 +14,9 @@ pub const Data = struct {
 
     pub fn format(
         self: Data,
-        comptime _: []const u8,
-        options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        try std.fmt.formatBuf(self.data, options, writer);
+        try writer.writeAll(self.data);
     }
 };
 

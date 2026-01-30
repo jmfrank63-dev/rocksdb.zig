@@ -61,7 +61,9 @@ fn addRocksDB(
             .pic = if (force_pic == true) true else null,
         }),
     });
-    const dynamic_rocksdb = b.addLibrary(.{
+    // Windows DLLs have a 65535 symbol export limit, but RocksDB exports ~80k symbols
+    // So we only build the shared library on non-Windows platforms
+    const dynamic_rocksdb = if (target.result.os.tag != .windows) b.addLibrary(.{
         .name = "rocksdb_shared",
         .linkage = .dynamic,
         .root_module = b.createModule(.{
@@ -69,7 +71,7 @@ fn addRocksDB(
             .optimize = optimize,
             .pic = if (force_pic == true) true else null,
         }),
-    });
+    }) else null;
 
     const maybe_libsnappy = if (enable_snappy) b.addLibrary(.{
         .name = "snappy",
@@ -82,7 +84,9 @@ fn addRocksDB(
     }) else null;
 
     try buildRocksDB(b, static_rocksdb, maybe_libsnappy, target);
-    try buildRocksDB(b, dynamic_rocksdb, maybe_libsnappy, target);
+    if (dynamic_rocksdb) |dyn| {
+        try buildRocksDB(b, dyn, maybe_libsnappy, target);
+    }
 
     mod.addIncludePath(rocks_dep.path("include"));
     mod.linkLibrary(static_rocksdb);
