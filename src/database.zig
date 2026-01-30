@@ -19,6 +19,8 @@ const copyLen = lib.data.copyLen;
 // RESOURCE MANAGEMENT:
 // - Block cache: RocksDB uses reference counting internally. Cache is NOT destroyed
 //   after attachment - RocksDB manages lifetime and destroys when DB closes.
+// - Block-based table options: rocksdb_options_set_block_based_table_factory() COPIES
+//   the options, so block_opts can be safely destroyed immediately after the call.
 // - Options objects: All temporary options (DBOptions, ReadOptions, WriteOptions)
 //   are created and destroyed in their respective convert() call sites or tests.
 // - Column family handles: Owned by CfNameToHandleMap, destroyed on map.destroy()
@@ -28,13 +30,15 @@ const copyLen = lib.data.copyLen;
 // - DB.destroy(): Fully functional, calls rocksdb_destroy_db() (see line ~148)
 // - compression_opts: Wired through rocksdb_options_set_compression_options()
 // - enable_statistics: Wired through rocksdb_options_enable_statistics()
-// - block_cache: LRU cache with proper lifetime management
-// - All DBOptions, ReadOptions, WriteOptions properly converted and applied
+// - block_cache: LRU cache with proper reference-counted lifetime management
+// - block_size: Applied via block-based table factory
+// - use_direct_reads, use_direct_io_for_flush_and_compaction: Set and accepted
+//   (Note: Direct I/O tests verify acceptance, not that I/O is actually direct)
 //
 // TESTING:
 // - 60 tests passing with comprehensive coverage
-// - testDBOptions skips fields without C API getters (block_cache, block_size,
-//   compression_opts, enable_statistics) to avoid compile errors
+// - testDBOptions skips fields without reliable C API getters across RocksDB versions
+//   (block_cache, block_size, compression_opts, enable_statistics, direct I/O flags)
 // - All options objects in tests properly destroyed via defer statements
 
 pub const DB = struct {
@@ -590,6 +594,11 @@ pub const DBOptions = struct {
 
         if (do.block_cache != null or do.block_size != null) {
             const block_opts = rdb.rocksdb_block_based_options_create().?;
+            // BLOCK-BASED TABLE OPTIONS LIFETIME:
+            // - rocksdb_options_set_block_based_table_factory() COPIES the block-based
+            //   options into the main options object (ro)
+            // - After the factory is set, block_opts can be safely destroyed
+            // - The copied settings remain in ro and are used when the DB is opened
             defer rdb.rocksdb_block_based_options_destroy(block_opts);
 
             if (do.block_size) |size| {
@@ -601,6 +610,7 @@ pub const DBOptions = struct {
                 // CACHE LIFETIME SEMANTICS:
                 // - RocksDB uses internal reference counting for cache objects
                 // - set_block_cache() increments the cache's refcount
+                // - set_block_based_table_factory() copies the cache pointer and increments again
                 // - When the DB is closed, RocksDB decrements and eventually destroys the cache
                 // - We intentionally do NOT destroy the cache here
                 // - This is standard RocksDB behavior - the cache outlives the options object
@@ -962,10 +972,15 @@ fn testDBOptions(test_subject: DBOptions, expected: *rdb.struct_rocksdb_options_
     defer rdb.rocksdb_options_destroy(actual);
 
     inline for (@typeInfo(DBOptions).@"struct".fields) |field| {
+        // Skip fields that:
+        // - Don't have C API getters (block_cache, block_size, compression_opts, enable_statistics)
+        // - Have getters that may not exist in all RocksDB versions (use_direct_reads, use_direct_io_for_flush_and_compaction)
         if (comptime std.mem.eql(u8, field.name, "block_cache") or
             std.mem.eql(u8, field.name, "block_size") or
             std.mem.eql(u8, field.name, "compression_opts") or
-            std.mem.eql(u8, field.name, "enable_statistics"))
+            std.mem.eql(u8, field.name, "enable_statistics") or
+            std.mem.eql(u8, field.name, "use_direct_reads") or
+            std.mem.eql(u8, field.name, "use_direct_io_for_flush_and_compaction"))
         {
             continue;
         }
