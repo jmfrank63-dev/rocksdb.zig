@@ -521,15 +521,37 @@ fn buildRocksDB(
             .flags = rocksdb_flags.items,
         });
     } else {
-        @panic("TODO: support windows!");
+        librocksdb.root_module.addCMacro("OS_WIN", "");
+        librocksdb.root_module.addCMacro("WIN32", "");
+        librocksdb.root_module.addCMacro("_MBCS", "");
+        librocksdb.root_module.addCMacro("WIN64", "");
+        librocksdb.root_module.addCMacro("NOMINMAX", "");
+        librocksdb.root_module.addCMacro("_WINDOWS", "");
+        librocksdb.addCSourceFiles(.{
+            .root = rocks_dep.path("."),
+            .files = &.{
+                "port/win/env_win.cc",
+                "port/win/env_default.cc",
+                "port/win/port_win.cc",
+                "port/win/io_win.cc",
+                "port/win/win_logger.cc",
+                "port/win/win_thread.cc",
+            },
+            .flags = rocksdb_flags.items,
+        });
+        librocksdb.linkSystemLibrary("rpcrt4");
+        librocksdb.linkSystemLibrary("shlwapi");
     }
 
     const os_name = switch (t.os.tag) {
         .macos => "OS_MACOSX",
         .linux => "OS_LINUX",
+        .windows => null, // Already set OS_WIN above
         else => std.debug.panic("TODO: support target OS '{s}'", .{@tagName(t.os.tag)}),
     };
-    librocksdb.root_module.addCMacro(os_name, "");
+    if (os_name) |name| {
+        librocksdb.root_module.addCMacro(name, "");
+    }
 
     const build_version = b.addConfigHeader(.{
         .style = .{ .cmake = rocks_dep.path("util/build_version.cc.in") },
