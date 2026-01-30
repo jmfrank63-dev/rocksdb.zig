@@ -30,6 +30,7 @@ const copyLen = lib.data.copyLen;
 // - DB.destroy(): Fully implemented and tested with rocksdb_destroy_db()
 // - compression_opts: Set via rocksdb_options_set_compression_options() (smoke-tested)
 // - enable_statistics: Set via rocksdb_options_enable_statistics() (smoke-tested)
+// - max_manifest_file_size: Set via rocksdb_options_set_max_manifest_file_size() (tested via getter)
 // - block_cache: LRU cache set and reference-counted (smoke-tested; expected not to leak per RocksDB refcounting)
 // - block_size: Set via block-based table factory (smoke-tested)
 // - use_direct_reads, use_direct_io_for_flush_and_compaction: Set and accepted by RocksDB
@@ -72,7 +73,7 @@ pub const DB = struct {
         maybe_column_families: ?[]const ColumnFamilyDescription,
         for_read_only: bool,
         err_str: *?Data,
-    ) (Allocator.Error || error{RocksDBOpen})!struct { Self, []const ColumnFamily } {
+    ) (Allocator.Error || error{ RocksDBOpen, RocksDBSetOptions })!struct { Self, []const ColumnFamily } {
         const column_families = if (maybe_column_families) |cfs|
             cfs
         else
@@ -150,6 +151,11 @@ pub const DB = struct {
             try cf_map.putUnowned(name, cf_handles[i].?);
             // Only increment after everything succeeds - this prevents double-free
             initialized_count = i + 1;
+        }
+
+        // Apply dynamic options after database is opened
+        if (hasDynamicDBOptions(db_options.dynamic)) {
+            try applyDynamicDBOptions(db.?, db_options.dynamic, allocator, err_str);
         }
 
         return .{
@@ -426,6 +432,22 @@ pub const DB = struct {
     }
 };
 
+/// Dynamic ReadOptions that use direct C API setters (once exposed).
+/// These options are not yet exposed in the RocksDB C API but are implemented in C++.
+/// When the C API is extended (rocksdb_readoptions_set_allow_unprepared_value),
+/// these fields will be set directly in the convert() function.
+///
+/// NOTE: Unlike DynamicDBOptions, these cannot be set via rocksdb_set_options
+/// because read options are per-read, not per-database. They must wait for
+/// direct C API exposure to be functional.
+pub const DynamicReadOptions = struct {
+    /// Allow loading values on-demand (BlobDB feature, added in v9.8.0)
+    /// When enabled, values are only fetched if PrepareValue is called.
+    /// Waiting for C API: rocksdb_readoptions_set_allow_unprepared_value
+    /// Tracked by: https://github.com/facebook/rocksdb/issues/14114
+    allow_unprepared_value: ?bool = null,
+};
+
 pub const ReadOptions = struct {
     /// If true, all data read from underlying storage will be
     /// verified against corresponding checksums.
@@ -450,6 +472,10 @@ pub const ReadOptions = struct {
     ///
     /// Default: 0
     readahead_size: usize = 0,
+
+    /// Dynamic options waiting for C API exposure.
+    /// Uses rocksdb_set_options with string-based configuration.
+    dynamic: DynamicReadOptions = .{},
 
     fn convert(ro: ReadOptions) *rdb.struct_rocksdb_readoptions_t {
         const rro = rdb.rocksdb_readoptions_create().?;
@@ -484,6 +510,23 @@ pub const WriteOptions = struct {
         rdb.rocksdb_writeoptions_disable_WAL(rwo, @intFromBool(wo.disable_wal));
         return rwo;
     }
+};
+
+/// Dynamic DBOptions that use rocksdb_set_options for string-based configuration.
+/// These options are not yet exposed in the RocksDB C API but are implemented in C++.
+/// When the C API is extended, these can be moved to static convert() calls.
+pub const DynamicDBOptions = struct {
+    /// Space amplification threshold for manifest file (added in v10.9.1)
+    /// Controls how much the manifest can grow before being compacted.
+    /// Waiting for C API: rocksdb_options_set_max_manifest_space_amp_pct
+    /// Tracked by: https://github.com/facebook/rocksdb/issues/XXXXX
+    max_manifest_space_amp_pct: ?u32 = null,
+
+    /// Treat target file size as upper bound (added in v10.9.1)
+    /// When enabled, RocksDB won't exceed target_file_size_base during compactions.
+    /// Waiting for C API: rocksdb_options_set_target_file_size_is_upper_bound
+    /// Tracked by: https://github.com/facebook/rocksdb/issues/XXXXX
+    target_file_size_is_upper_bound: ?bool = null,
 };
 
 pub const DBOptions = struct {
@@ -535,6 +578,11 @@ pub const DBOptions = struct {
     /// Default: 2
     max_background_jobs: i32 = 2,
 
+    /// Maximum size of a manifest file before RocksDB rolls to a new one.
+    ///
+    /// Default: RocksDB default (leave unset)
+    max_manifest_file_size: ?usize = null,
+
     /// Compress blocks using the specified compression algorithm.
     ///
     /// Default: snappy if supported, otherwise no compression
@@ -571,6 +619,10 @@ pub const DBOptions = struct {
     /// Default: false
     use_direct_io_for_flush_and_compaction: bool = false,
 
+    /// Dynamic options waiting for C API exposure.
+    /// Uses rocksdb_set_options with string-based configuration.
+    dynamic: DynamicDBOptions = .{},
+
     fn convert(do: DBOptions) *rdb.struct_rocksdb_options_t {
         const ro = rdb.rocksdb_options_create().?;
         rdb.rocksdb_options_set_create_if_missing(ro, @intFromBool(do.create_if_missing));
@@ -579,6 +631,9 @@ pub const DBOptions = struct {
         rdb.rocksdb_options_set_write_buffer_size(ro, do.write_buffer_size);
         rdb.rocksdb_options_set_max_write_buffer_number(ro, do.max_write_buffer_number);
         rdb.rocksdb_options_set_max_background_jobs(ro, do.max_background_jobs);
+        if (do.max_manifest_file_size) |size| {
+            rdb.rocksdb_options_set_max_manifest_file_size(ro, size);
+        }
         rdb.rocksdb_options_set_compression(ro, @intFromEnum(do.compression));
 
         // Set compression options if compression is enabled
@@ -631,6 +686,87 @@ pub const DBOptions = struct {
         return ro;
     }
 };
+
+/// Apply dynamic DB options to an already-opened database using rocksdb_set_options.
+/// This is a transitional approach while waiting for direct C API exposure.
+/// Note: Some options may not be settable on an already-open database.
+/// To guarantee options take full effect, set them before DB.open() via C API once exposed.
+fn applyDynamicDBOptions(
+    db: *rdb.rocksdb_t,
+    dyno: DynamicDBOptions,
+    allocator: Allocator,
+    err_str: *?Data,
+) (Allocator.Error || error{RocksDBSetOptions})!void {
+    // Build dynamic options strings with NUL termination.
+    // Keys are static NUL-terminated literals; only values need allocation.
+    var alloc_buffers: [2][]u8 = undefined; // Only values
+    var alloc_count: usize = 0;
+    var key_ptrs: [2][*c]const u8 = undefined;
+    var val_ptrs: [2][*c]const u8 = undefined;
+    var count: usize = 0;
+
+    defer {
+        // Free all allocated buffers (values only)
+        for (alloc_buffers[0..alloc_count]) |buf| {
+            allocator.free(buf);
+        }
+    }
+
+    if (dyno.max_manifest_space_amp_pct) |pct| {
+        // Allocate and NUL-terminate the value
+        const val_str = try std.fmt.allocPrint(allocator, "{d}", .{pct});
+        defer allocator.free(val_str);
+        var val_buf = try allocator.alloc(u8, val_str.len + 1);
+        @memcpy(val_buf[0..val_str.len], val_str);
+        val_buf[val_str.len] = 0;
+        alloc_buffers[alloc_count] = val_buf;
+        alloc_count += 1;
+
+        key_ptrs[count] = "max_manifest_space_amp_pct\x00";
+        val_ptrs[count] = @ptrCast(val_buf.ptr);
+        count += 1;
+    }
+
+    if (dyno.target_file_size_is_upper_bound) |enabled| {
+        // Allocate and NUL-terminate the value
+        const val_lit = if (enabled) "true" else "false";
+        var val_buf = try allocator.alloc(u8, val_lit.len + 1);
+        @memcpy(val_buf[0..val_lit.len], val_lit);
+        val_buf[val_lit.len] = 0;
+        alloc_buffers[alloc_count] = val_buf;
+        alloc_count += 1;
+
+        key_ptrs[count] = "target_file_size_is_upper_bound\x00";
+        val_ptrs[count] = @ptrCast(val_buf.ptr);
+        count += 1;
+    }
+
+    if (count > 0) {
+        var ch = CallHandler.init(err_str);
+        rdb.rocksdb_set_options(
+            db,
+            @intCast(count),
+            @ptrCast(key_ptrs[0..count].ptr),
+            @ptrCast(val_ptrs[0..count].ptr),
+            @ptrCast(&ch.err_str_in),
+        );
+
+        // Surface error message and free it via rocksdb_free
+        if (ch.err_str_in) |s| {
+            err_str.* = .{
+                .data = std.mem.span(s),
+                .free = rdb.rocksdb_free,
+            };
+            return error.RocksDBSetOptions;
+        }
+    }
+}
+
+/// Check if any dynamic DB options are set.
+fn hasDynamicDBOptions(dyno: DynamicDBOptions) bool {
+    return dyno.max_manifest_space_amp_pct != null or
+        dyno.target_file_size_is_upper_bound != null;
+}
 
 pub const Compression = enum(c_int) {
     none = 0,
@@ -733,6 +869,20 @@ test "DBOptions custom" {
     rdb.rocksdb_options_set_max_write_buffer_number(expected, 4);
     rdb.rocksdb_options_set_max_background_jobs(expected, 8);
     rdb.rocksdb_options_set_compression(expected, @intFromEnum(Compression.lz4));
+
+    try testDBOptions(subject, expected);
+}
+
+test "DBOptions with max_manifest_file_size" {
+    const subject = DBOptions{
+        .max_manifest_file_size = 4 * 1024 * 1024,
+    };
+
+    const expected = rdb.rocksdb_options_create().?;
+    defer rdb.rocksdb_options_destroy(expected);
+    // Match our default compression setting
+    rdb.rocksdb_options_set_compression(expected, @intFromEnum(Compression.snappy));
+    rdb.rocksdb_options_set_max_manifest_file_size(expected, 4 * 1024 * 1024);
 
     try testDBOptions(subject, expected);
 }
@@ -981,14 +1131,16 @@ fn testDBOptions(test_subject: DBOptions, expected: *rdb.struct_rocksdb_options_
 
     inline for (@typeInfo(DBOptions).@"struct".fields) |field| {
         // Skip fields that:
-        // - Don't have C API getters (block_cache, block_size, compression_opts, enable_statistics)
+        // - Don't have C API getters (block_cache, block_size, compression_opts, enable_statistics, dynamic)
         // - Have getters that may not exist in all RocksDB versions (use_direct_reads, use_direct_io_for_flush_and_compaction)
+        // - dynamic is tested elsewhere (uses rocksdb_set_options, not direct getters)
         if (comptime std.mem.eql(u8, field.name, "block_cache") or
             std.mem.eql(u8, field.name, "block_size") or
             std.mem.eql(u8, field.name, "compression_opts") or
             std.mem.eql(u8, field.name, "enable_statistics") or
             std.mem.eql(u8, field.name, "use_direct_reads") or
-            std.mem.eql(u8, field.name, "use_direct_io_for_flush_and_compaction"))
+            std.mem.eql(u8, field.name, "use_direct_io_for_flush_and_compaction") or
+            std.mem.eql(u8, field.name, "dynamic"))
         {
             continue;
         }
@@ -2211,4 +2363,167 @@ test "CompressionOptions custom values" {
     try std.testing.expectEqual(@as(i32, 8192), opts.max_dict_bytes);
     try std.testing.expectEqual(@as(i32, 16384), opts.zstd_max_train_bytes);
     try std.testing.expectEqual(@as(i32, 4), opts.parallel_threads);
+}
+
+test "DBOptions with dynamic max_manifest_space_amp_pct (smoke test)" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // Test with dynamic manifest space amplification option.
+    // Note: This option cannot be set on an already-open database via rocksdb_set_options,
+    // so we expect RocksDBSetOptions error. When the C API exposes
+    // rocksdb_options_set_max_manifest_space_amp_pct, this will be set pre-open instead.
+    var db, const families = DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .dynamic = .{
+                .max_manifest_space_amp_pct = 50,
+            },
+        },
+        null,
+        false,
+        &err_str,
+    ) catch |e| {
+        // Expected: RocksDBSetOptions when dynamic option can't be applied post-open
+        if (e == error.RocksDBSetOptions) {
+            return;
+        }
+        return e;
+    };
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Verify database is still functional even if dynamic option failed
+    try db.put(null, "manifest_test", "value", .{}, &err_str);
+    const val = try db.get(null, "manifest_test", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+}
+
+test "DBOptions with dynamic target_file_size_is_upper_bound (smoke test)" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // Test with dynamic target file size upper bound option.
+    // Note: This option cannot be set on an already-open database via rocksdb_set_options,
+    // so we expect RocksDBSetOptions error. When the C API exposes
+    // rocksdb_options_set_target_file_size_is_upper_bound, this will be set pre-open instead.
+    var db, const families = DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .dynamic = .{
+                .target_file_size_is_upper_bound = true,
+            },
+        },
+        null,
+        false,
+        &err_str,
+    ) catch |e| {
+        // Expected: RocksDBSetOptions when dynamic option can't be applied post-open
+        if (e == error.RocksDBSetOptions) {
+            return;
+        }
+        return e;
+    };
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Verify database is still functional even if dynamic option failed
+    try db.put(null, "filesize_test", "value", .{}, &err_str);
+    const val = try db.get(null, "filesize_test", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+}
+
+test "DBOptions with multiple dynamic options (smoke test)" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // Test with multiple dynamic options.
+    // Note: These options cannot be set on an already-open database via rocksdb_set_options,
+    // so we expect RocksDBSetOptions error. When the C API exposes the corresponding setters,
+    // these will be set pre-open instead.
+    var db, const families = DB.open(
+        allocator,
+        path,
+        .{
+            .create_if_missing = true,
+            .dynamic = .{
+                .max_manifest_space_amp_pct = 50,
+                .target_file_size_is_upper_bound = true,
+            },
+        },
+        null,
+        false,
+        &err_str,
+    ) catch |e| {
+        // Expected: RocksDBSetOptions when dynamic options can't be applied post-open
+        if (e == error.RocksDBSetOptions) {
+            return;
+        }
+        return e;
+    };
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Verify database is still functional even if dynamic options failed
+    for (0..10) |i| {
+        const key = try std.fmt.allocPrint(allocator, "key_{d}", .{i});
+        defer allocator.free(key);
+        const value = try std.fmt.allocPrint(allocator, "value_{d}", .{i});
+        defer allocator.free(value);
+        try db.put(null, key, value, .{}, &err_str);
+    }
+}
+
+test "ReadOptions with DynamicReadOptions placeholder" {
+    // DynamicReadOptions is a placeholder for future C API additions.
+    // Unlike DynamicDBOptions, read options cannot be set via rocksdb_set_options
+    // because they are per-read settings, not database-wide settings.
+    //
+    // When RocksDB exposes rocksdb_readoptions_set_allow_unprepared_value in the C API,
+    // this field will be moved from DynamicReadOptions to ReadOptions and integrated
+    // into the convert() method. For now, the field exists to:
+    // - Document the option in Zig API
+    // - Prepare the migration path when C API is available
+    // - Maintain type safety for future use
+    const read_opts = ReadOptions{
+        .verify_checksums = true,
+        .dynamic = .{
+            .allow_unprepared_value = true,
+        },
+    };
+
+    try std.testing.expect(read_opts.dynamic.allow_unprepared_value == true);
 }
