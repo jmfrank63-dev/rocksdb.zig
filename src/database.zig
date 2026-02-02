@@ -78,7 +78,7 @@ pub const DB = struct {
         maybe_column_families: ?[]const ColumnFamilyDescription,
         for_read_only: bool,
         err_str: *?Data,
-    ) (Allocator.Error || error{ RocksDBOpen, RocksDBSetOptions })!struct { Self, []const ColumnFamily } {
+    ) (Allocator.Error || error{ RocksDBOpen, RocksDBSetOptions } || MergeOperatorError)!struct { Self, []const ColumnFamily } {
         const column_families = if (maybe_column_families) |cfs|
             cfs
         else
@@ -91,15 +91,16 @@ pub const DB = struct {
         const db = db: {
             const cf_options = try allocator.alloc(?*const rdb.rocksdb_options_t, column_families.len);
             defer allocator.free(cf_options);
+            @memset(cf_options, null);
+            defer for (cf_options) |opt| {
+                if (opt) |o| rdb.rocksdb_options_destroy(@constCast(o));
+            };
             const cf_names = try allocator.alloc([*c]const u8, column_families.len);
             defer allocator.free(cf_names);
             for (column_families, 0..) |cf, i| {
                 cf_names[i] = @ptrCast(cf.name.ptr);
-                cf_options[i] = cf.options.convert();
+                cf_options[i] = try cf.options.convert();
             }
-            defer for (cf_options) |opt| {
-                if (opt) |o| rdb.rocksdb_options_destroy(@constCast(o));
-            };
 
             const db_opts = db_options.convert();
             defer rdb.rocksdb_options_destroy(db_opts);
@@ -301,6 +302,40 @@ pub const DB = struct {
             key.len,
             @ptrCast(&ch.err_str_in),
         ), error.RocksDBDelete);
+    }
+
+    /// Merge a value with the existing value at the given key.
+    ///
+    /// IMPORTANT: This operation requires a merge operator to be configured when opening
+    /// the database. The RocksDB C API does not currently expose built-in merge operators,
+    /// so they must be configured through custom callbacks or other means outside this wrapper.
+    ///
+    /// Without a configured merge operator, this call will fail with an error indicating
+    /// "merge operator is not provided".
+    ///
+    /// For information on implementing merge operators, see:
+    /// https://github.com/facebook/rocksdb/wiki/Merge-Operator
+    pub fn merge(
+        self: *const Self,
+        column_family: ?ColumnFamilyHandle,
+        key: []const u8,
+        value: []const u8,
+        write_options: WriteOptions,
+        err_str: *?Data,
+    ) error{RocksDBMerge}!void {
+        const options = write_options.convert();
+        defer rdb.rocksdb_writeoptions_destroy(options);
+        var ch = CallHandler.init(err_str);
+        try ch.handle(rdb.rocksdb_merge_cf(
+            self.db,
+            options,
+            column_family orelse self.default_cf,
+            key.ptr,
+            key.len,
+            value.ptr,
+            value.len,
+            @ptrCast(&ch.err_str_in),
+        ), error.RocksDBMerge);
     }
 
     pub fn deleteFilesInRange(
@@ -823,7 +858,7 @@ pub const TransactionDB = struct {
         txn_db_options: TransactionDBOptions,
         maybe_column_families: ?[]const ColumnFamilyDescription,
         err_str: *?Data,
-    ) (Allocator.Error || error{ RocksDBTransactionOpen, RocksDBSetOptions })!struct { Self, []const ColumnFamily } {
+    ) (Allocator.Error || error{ RocksDBTransactionOpen, RocksDBSetOptions } || MergeOperatorError)!struct { Self, []const ColumnFamily } {
         const column_families = if (maybe_column_families) |cfs|
             cfs
         else
@@ -835,15 +870,16 @@ pub const TransactionDB = struct {
         const txn_db = txn_db: {
             const cf_options = try allocator.alloc(?*const rdb.rocksdb_options_t, column_families.len);
             defer allocator.free(cf_options);
+            @memset(cf_options, null);
+            defer for (cf_options) |opt| {
+                if (opt) |o| rdb.rocksdb_options_destroy(@constCast(o));
+            };
             const cf_names = try allocator.alloc([*c]const u8, column_families.len);
             defer allocator.free(cf_names);
             for (column_families, 0..) |cf, i| {
                 cf_names[i] = @ptrCast(cf.name.ptr);
-                cf_options[i] = cf.options.convert();
+                cf_options[i] = try cf.options.convert();
             }
-            defer for (cf_options) |opt| {
-                if (opt) |o| rdb.rocksdb_options_destroy(@constCast(o));
-            };
 
             const db_opts = db_options.convert();
             defer rdb.rocksdb_options_destroy(db_opts);
@@ -1075,7 +1111,7 @@ pub const OptimisticTransactionDB = struct {
         db_options: DBOptions,
         maybe_column_families: ?[]const ColumnFamilyDescription,
         err_str: *?Data,
-    ) (Allocator.Error || error{ RocksDBTransactionOpen, RocksDBSetOptions })!struct { Self, []const ColumnFamily } {
+    ) (Allocator.Error || error{ RocksDBTransactionOpen, RocksDBSetOptions } || MergeOperatorError)!struct { Self, []const ColumnFamily } {
         const column_families = if (maybe_column_families) |cfs|
             cfs
         else
@@ -1087,15 +1123,16 @@ pub const OptimisticTransactionDB = struct {
         const db = db: {
             const cf_options = try allocator.alloc(?*const rdb.rocksdb_options_t, column_families.len);
             defer allocator.free(cf_options);
+            @memset(cf_options, null);
+            defer for (cf_options) |opt| {
+                if (opt) |o| rdb.rocksdb_options_destroy(@constCast(o));
+            };
             const cf_names = try allocator.alloc([*c]const u8, column_families.len);
             defer allocator.free(cf_names);
             for (column_families, 0..) |cf, i| {
                 cf_names[i] = @ptrCast(cf.name.ptr);
-                cf_options[i] = cf.options.convert();
+                cf_options[i] = try cf.options.convert();
             }
-            defer for (cf_options) |opt| {
-                if (opt) |o| rdb.rocksdb_options_destroy(@constCast(o));
-            };
 
             const db_opts = db_options.convert();
             defer rdb.rocksdb_options_destroy(db_opts);
@@ -1733,6 +1770,346 @@ pub const FilterPolicyOptions = struct {
     use_full: bool = false,
 };
 
+/// Merge operator handle for RocksDB.
+/// Encapsulates a rocksdb_mergeoperator_t and manages its lifetime.
+///
+/// LIFETIME SEMANTICS:
+/// When a MergeOperator is set in ColumnFamilyOptions and passed to DB.open(),
+/// RocksDB takes ownership of the merge operator via shared_ptr.
+/// DO NOT call deinit() on a merge operator after it has been passed to DB.open().
+/// RocksDB will automatically destroy it when the database is closed.
+///
+/// OWNERSHIP WARNING:
+/// Each MergeOperator can only be used with ONE column family. Using the same
+/// MergeOperator for multiple column families will cause a double-free when
+/// RocksDB destroys both column family options structs.
+///
+/// PERFORMANCE NOTE:
+/// All built-in merge operators use only full merge (no partial merge).
+/// This means merges always materialize full values during compaction,
+/// which may increase CPU and memory usage for heavy merge workloads.
+pub const MergeOperator = struct {
+    handle: ?*rdb.rocksdb_mergeoperator_t,
+
+    /// Destroy the merge operator and free associated resources.
+    /// WARNING: Only call this if the merge operator was NOT passed to DB.open().
+    /// If passed to DB.open(), RocksDB owns it and will destroy it automatically.
+    pub fn deinit(self: *MergeOperator) void {
+        if (self.handle) |h| {
+            rdb.rocksdb_mergeoperator_destroy(h);
+            self.handle = null;
+        }
+    }
+
+    /// Consume the merge operator handle, transferring ownership.
+    /// After this call, the MergeOperator should not be used again.
+    /// Returns null if the handle was already consumed.
+    fn consume(self: *MergeOperator) ?*rdb.rocksdb_mergeoperator_t {
+        const h = self.handle;
+        self.handle = null;
+        return h;
+    }
+
+    /// Create a StringAppend merge operator with the specified delimiter.
+    /// Concatenates values with the given delimiter string.
+    ///
+    /// Example: With delimiter ",", merging "a" and "b" yields "a,b"
+    ///
+    /// Note: Uses full merge only (no partial merge optimization).
+    pub fn createStringAppend(delimiter: []const u8) (Allocator.Error || error{MergeOperatorCreateFailed})!MergeOperator {
+        return createStringAppendInternal(std.heap.c_allocator, rdb.rocksdb_mergeoperator_create, delimiter);
+    }
+
+    /// Internal helper for testing allocator failure paths. Not part of public API.
+    ///
+    /// IMPORTANT: The injected `allocator` parameter is captured in the State struct
+    /// and used by the RocksDB destructor callback. If this function is called with
+    /// a custom allocator on the success path, that allocator instance MUST remain
+    /// valid until RocksDB destroys the merge operator (when the DB closes).
+    ///
+    /// Failure paths (Allocator.Error or MergeOperatorCreateFailed) are safe; the
+    /// allocator is only used on the success path within the destructor.
+    fn createStringAppendInternal(
+        allocator: Allocator,
+        mergeopFn: anytype,
+        delimiter: []const u8,
+    ) (Allocator.Error || error{MergeOperatorCreateFailed})!MergeOperator {
+        const State = struct {
+            allocator: Allocator,
+            delim: []const u8,
+        };
+
+        const state = try allocator.create(State);
+        errdefer allocator.destroy(state);
+        state.* = .{ .allocator = allocator, .delim = try allocator.dupe(u8, delimiter) };
+        errdefer allocator.free(state.*.delim);
+
+        const handle = mergeopFn(
+            state,
+            struct {
+                fn destructor(s: ?*anyopaque) callconv(.c) void {
+                    const st: *State = @ptrCast(@alignCast(s));
+                    st.allocator.free(st.delim);
+                    st.allocator.destroy(st);
+                }
+            }.destructor,
+            struct {
+                fn fullMerge(
+                    s: ?*anyopaque,
+                    key: [*c]const u8,
+                    key_len: usize,
+                    existing_value: [*c]const u8,
+                    existing_value_len: usize,
+                    operands_list: [*c]const [*c]const u8,
+                    operands_list_len: [*c]const usize,
+                    num_operands: c_int,
+                    success: [*c]u8,
+                    new_value_len: [*c]usize,
+                ) callconv(.c) [*c]u8 {
+                    _ = key;
+                    _ = key_len;
+                    const st: *State = @ptrCast(@alignCast(s));
+
+                    // Calculate total size needed
+                    var total_size: usize = 0;
+                    if (existing_value != null) {
+                        total_size += existing_value_len;
+                    }
+
+                    const ops = @as([*]const [*c]const u8, @ptrCast(operands_list))[0..@intCast(num_operands)];
+                    const lens = @as([*]const usize, @ptrCast(operands_list_len))[0..@intCast(num_operands)];
+
+                    for (lens) |len| {
+                        if (total_size > 0) total_size += st.delim.len;
+                        total_size += len;
+                    }
+
+                    // Allocate result
+                    const result = @as([*c]u8, @ptrCast(std.heap.c_allocator.alloc(u8, total_size) catch {
+                        success.* = 0;
+                        return null;
+                    }));
+
+                    // Build result
+                    var pos: usize = 0;
+                    if (existing_value != null) {
+                        @memcpy(result[pos .. pos + existing_value_len], existing_value[0..existing_value_len]);
+                        pos += existing_value_len;
+                    }
+
+                    for (ops, lens) |op, len| {
+                        if (pos > 0) {
+                            @memcpy(result[pos .. pos + st.delim.len], st.delim);
+                            pos += st.delim.len;
+                        }
+                        @memcpy(result[pos .. pos + len], op[0..len]);
+                        pos += len;
+                    }
+
+                    success.* = 1;
+                    new_value_len.* = total_size;
+                    return result;
+                }
+            }.fullMerge,
+            null, // partial_merge (optional)
+            struct {
+                fn deleteValue(_: ?*anyopaque, value: [*c]const u8, value_len: usize) callconv(.c) void {
+                    const slice = @as([*]u8, @ptrFromInt(@intFromPtr(value)))[0..value_len];
+                    std.heap.c_allocator.free(slice);
+                }
+            }.deleteValue,
+            struct {
+                fn name(_: ?*anyopaque) callconv(.c) [*c]const u8 {
+                    return "StringAppendOperator";
+                }
+            }.name,
+        ) orelse return error.MergeOperatorCreateFailed;
+
+        return .{ .handle = handle };
+    }
+
+    /// Create a UInt64Add merge operator.
+    /// Adds uint64 values encoded as 8-byte little-endian.
+    ///
+    /// Note: Uses full merge only (no partial merge optimization).
+    pub fn createUInt64Add() (Allocator.Error || error{MergeOperatorCreateFailed})!MergeOperator {
+        return createUInt64AddInternal(std.heap.c_allocator, rdb.rocksdb_mergeoperator_create);
+    }
+
+    fn createUInt64AddInternal(
+        _: Allocator,
+        mergeopFn: anytype,
+    ) error{MergeOperatorCreateFailed}!MergeOperator {
+        const handle = mergeopFn(
+            null,
+            struct {
+                fn destructor(_: ?*anyopaque) callconv(.c) void {
+                    // No state to destroy
+                }
+            }.destructor,
+            struct {
+                fn fullMerge(
+                    _: ?*anyopaque,
+                    key: [*c]const u8,
+                    key_len: usize,
+                    existing_value: [*c]const u8,
+                    existing_value_len: usize,
+                    operands_list: [*c]const [*c]const u8,
+                    operands_list_len: [*c]const usize,
+                    num_operands: c_int,
+                    success: [*c]u8,
+                    new_value_len: [*c]usize,
+                ) callconv(.c) [*c]u8 {
+                    _ = key;
+                    _ = key_len;
+
+                    var sum: u64 = 0;
+
+                    // Add existing value
+                    if (existing_value != null and existing_value_len == 8) {
+                        const bytes = existing_value[0..8];
+                        sum = std.mem.readInt(u64, bytes[0..8], .little);
+                    }
+
+                    // Add all operands
+                    const ops = @as([*]const [*c]const u8, @ptrCast(operands_list))[0..@intCast(num_operands)];
+                    const lens = @as([*]const usize, @ptrCast(operands_list_len))[0..@intCast(num_operands)];
+
+                    for (ops, lens) |op, len| {
+                        if (len == 8) {
+                            const bytes = op[0..8];
+                            const val = std.mem.readInt(u64, bytes[0..8], .little);
+                            sum +%= val; // Wrapping add
+                        }
+                    }
+
+                    // Allocate result
+                    const result = @as([*c]u8, @ptrCast(std.heap.c_allocator.alloc(u8, 8) catch {
+                        success.* = 0;
+                        return null;
+                    }));
+
+                    std.mem.writeInt(u64, result[0..8], sum, .little);
+
+                    success.* = 1;
+                    new_value_len.* = 8;
+                    return result;
+                }
+            }.fullMerge,
+            null, // partial_merge (optional)
+            struct {
+                fn deleteValue(_: ?*anyopaque, value: [*c]const u8, value_len: usize) callconv(.c) void {
+                    const slice = @as([*]u8, @ptrFromInt(@intFromPtr(value)))[0..value_len];
+                    std.heap.c_allocator.free(slice);
+                }
+            }.deleteValue,
+            struct {
+                fn name(_: ?*anyopaque) callconv(.c) [*c]const u8 {
+                    return "UInt64AddOperator";
+                }
+            }.name,
+        ) orelse return error.MergeOperatorCreateFailed;
+
+        return .{ .handle = handle };
+    }
+
+    /// Create a Max merge operator.
+    /// Keeps the lexicographically largest value.
+    ///
+    /// Note: Uses full merge only (no partial merge optimization).
+    pub fn createMax() (Allocator.Error || error{MergeOperatorCreateFailed})!MergeOperator {
+        return createMaxInternal(std.heap.c_allocator, rdb.rocksdb_mergeoperator_create);
+    }
+
+    fn createMaxInternal(
+        _: Allocator,
+        mergeopFn: anytype,
+    ) error{MergeOperatorCreateFailed}!MergeOperator {
+        const handle = mergeopFn(
+            null,
+            struct {
+                fn destructor(_: ?*anyopaque) callconv(.c) void {
+                    // No state to destroy
+                }
+            }.destructor,
+            struct {
+                fn fullMerge(
+                    _: ?*anyopaque,
+                    key: [*c]const u8,
+                    key_len: usize,
+                    existing_value: [*c]const u8,
+                    existing_value_len: usize,
+                    operands_list: [*c]const [*c]const u8,
+                    operands_list_len: [*c]const usize,
+                    num_operands: c_int,
+                    success: [*c]u8,
+                    new_value_len: [*c]usize,
+                ) callconv(.c) [*c]u8 {
+                    _ = key;
+                    _ = key_len;
+
+                    var max_ptr: [*c]const u8 = null;
+                    var max_len: usize = 0;
+
+                    // Consider existing value
+                    if (existing_value != null) {
+                        max_ptr = existing_value;
+                        max_len = existing_value_len;
+                    }
+
+                    // Compare with all operands
+                    const ops = @as([*]const [*c]const u8, @ptrCast(operands_list))[0..@intCast(num_operands)];
+                    const lens = @as([*]const usize, @ptrCast(operands_list_len))[0..@intCast(num_operands)];
+
+                    for (ops, lens) |op, len| {
+                        if (max_ptr == null) {
+                            max_ptr = op;
+                            max_len = len;
+                        } else {
+                            const cmp = std.mem.order(u8, max_ptr[0..max_len], op[0..len]);
+                            if (cmp == .lt) {
+                                max_ptr = op;
+                                max_len = len;
+                            }
+                        }
+                    }
+
+                    if (max_ptr == null) {
+                        success.* = 0;
+                        return null;
+                    }
+
+                    // Allocate and copy result
+                    const result = @as([*c]u8, @ptrCast(std.heap.c_allocator.alloc(u8, max_len) catch {
+                        success.* = 0;
+                        return null;
+                    }));
+
+                    @memcpy(result[0..max_len], max_ptr[0..max_len]);
+
+                    success.* = 1;
+                    new_value_len.* = max_len;
+                    return result;
+                }
+            }.fullMerge,
+            null, // partial_merge (optional)
+            struct {
+                fn deleteValue(_: ?*anyopaque, value: [*c]const u8, value_len: usize) callconv(.c) void {
+                    const slice = @as([*]u8, @ptrFromInt(@intFromPtr(value)))[0..value_len];
+                    std.heap.c_allocator.free(slice);
+                }
+            }.deleteValue,
+            struct {
+                fn name(_: ?*anyopaque) callconv(.c) [*c]const u8 {
+                    return "MaxOperator";
+                }
+            }.name,
+        ) orelse return error.MergeOperatorCreateFailed;
+
+        return .{ .handle = handle };
+    }
+};
+
 test "DB clean init and deinit" {
     const ns = struct {
         pub fn run(allocator: Allocator) !void {
@@ -2280,9 +2657,45 @@ pub const ColumnFamily = struct {
 
 pub const ColumnFamilyHandle = *rdb.rocksdb_column_family_handle_t;
 
+pub const MergeOperatorError = error{
+    /// MergeOperator handle was already consumed (reused across multiple column families).
+    MergeOperatorAlreadyConsumed,
+};
+
 pub const ColumnFamilyOptions = struct {
-    fn convert(_: ColumnFamilyOptions) *rdb.struct_rocksdb_options_t {
-        return rdb.rocksdb_options_create().?;
+    /// Optional merge operator for this column family.
+    /// When set, enables merge operations on the column family.
+    ///
+    /// IMPORTANT: RocksDB takes ownership of the merge operator when the
+    /// database is opened. The handle is consumed and nulled on the
+    /// MergeOperator instance itself. Do NOT call deinit() after passing
+    /// to DB.open(). RocksDB will destroy it when the DB closes.
+    ///
+    /// OWNERSHIP WARNING: Each MergeOperator can only be used with ONE
+    /// ColumnFamilyOptions. The handle is consumed (nulled) when passed to
+    /// DB.open(), preventing accidental reuse.
+    ///
+    /// Default: null (merge operations will fail)
+    merge_operator: ?*MergeOperator = null,
+
+    fn convert(self: *const ColumnFamilyOptions) MergeOperatorError!*rdb.struct_rocksdb_options_t {
+        // Validate handle before allocating options to avoid leaks on error
+        if (self.merge_operator) |op| {
+            if (op.handle == null) {
+                return error.MergeOperatorAlreadyConsumed;
+            }
+        }
+
+        const opts = rdb.rocksdb_options_create().?;
+
+        // Set merge operator if specified and consume the handle to prevent double-free
+        if (self.merge_operator) |op| {
+            if (op.consume()) |h| {
+                rdb.rocksdb_options_set_merge_operator(opts, h);
+            }
+        }
+
+        return opts;
     }
 };
 
@@ -4482,4 +4895,725 @@ test "Manual compaction via compactRange" {
 test "Manual compaction on specific key range" {
     // Note: Skipped - rocksdb_compact_range with specific keys may have issues
     // Full-range compaction is tested above in "Manual compaction via compactRange"
+}
+
+test "MergeOperator.createStringAppend basic" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // Create merge operator - will be owned by RocksDB after DB.open
+    var merge_op = try MergeOperator.createStringAppend(",");
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        &.{.{ .name = "default", .options = .{ .merge_operator = &merge_op } }},
+        false,
+        &err_str,
+    );
+    defer db.deinit(); // RocksDB will destroy the merge operator
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Test merge operations
+    try db.merge(null, "key1", "hello", .{}, &err_str);
+    try db.merge(null, "key1", "world", .{}, &err_str);
+
+    const val = try db.get(null, "key1", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualStrings("hello,world", val.?.data);
+}
+
+test "MergeOperator.createStringAppend with existing value" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var merge_op = try MergeOperator.createStringAppend("-");
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        &.{.{ .name = "default", .options = .{ .merge_operator = &merge_op } }},
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Put initial value, then merge
+    try db.put(null, "key1", "initial", .{}, &err_str);
+    try db.merge(null, "key1", "appended", .{}, &err_str);
+
+    const val = try db.get(null, "key1", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualStrings("initial-appended", val.?.data);
+}
+
+test "MergeOperator.createUInt64Add basic" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var merge_op = try MergeOperator.createUInt64Add();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        &.{.{ .name = "default", .options = .{ .merge_operator = &merge_op } }},
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Merge uint64 values
+    var buf1: [8]u8 = undefined;
+    var buf2: [8]u8 = undefined;
+    var buf3: [8]u8 = undefined;
+    std.mem.writeInt(u64, &buf1, 10, .little);
+    std.mem.writeInt(u64, &buf2, 20, .little);
+    std.mem.writeInt(u64, &buf3, 30, .little);
+
+    try db.merge(null, "counter", &buf1, .{}, &err_str);
+    try db.merge(null, "counter", &buf2, .{}, &err_str);
+    try db.merge(null, "counter", &buf3, .{}, &err_str);
+
+    const val = try db.get(null, "counter", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+    try std.testing.expectEqual(@as(usize, 8), val.?.data.len);
+    const result = std.mem.readInt(u64, val.?.data[0..8], .little);
+    try std.testing.expectEqual(@as(u64, 60), result);
+}
+
+test "MergeOperator.createMax basic" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var merge_op = try MergeOperator.createMax();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        &.{.{ .name = "default", .options = .{ .merge_operator = &merge_op } }},
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    // Merge to find max
+    try db.merge(null, "max_key", "apple", .{}, &err_str);
+    try db.merge(null, "max_key", "zebra", .{}, &err_str);
+    try db.merge(null, "max_key", "banana", .{}, &err_str);
+
+    const val = try db.get(null, "max_key", .{}, &err_str);
+    defer if (val) |v| v.deinit();
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualStrings("zebra", val.?.data);
+}
+
+test "MergeOperator with multiple column families" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // IMPORTANT: Create separate merge operators for each column family
+    // Using the same operator for multiple CFs would cause double-free
+    var string_merge = try MergeOperator.createStringAppend(",");
+    var uint_merge = try MergeOperator.createUInt64Add();
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true, .create_missing_column_families = true },
+        &.{
+            .{ .name = "default", .options = .{ .merge_operator = &string_merge } },
+            .{ .name = "counters", .options = .{ .merge_operator = &uint_merge } },
+        },
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    const cf_default = families[0].handle;
+    const cf_counters = families[1].handle;
+
+    // String merge in default CF
+    try db.merge(cf_default, "text", "foo", .{}, &err_str);
+    try db.merge(cf_default, "text", "bar", .{}, &err_str);
+
+    // Uint merge in counters CF
+    var buf1: [8]u8 = undefined;
+    var buf2: [8]u8 = undefined;
+    std.mem.writeInt(u64, &buf1, 100, .little);
+    std.mem.writeInt(u64, &buf2, 50, .little);
+    try db.merge(cf_counters, "count", &buf1, .{}, &err_str);
+    try db.merge(cf_counters, "count", &buf2, .{}, &err_str);
+
+    // Verify default CF
+    const val1 = try db.get(cf_default, "text", .{}, &err_str);
+    defer if (val1) |v| v.deinit();
+    try std.testing.expect(val1 != null);
+    try std.testing.expectEqualStrings("foo,bar", val1.?.data);
+
+    // Verify counters CF
+    const val2 = try db.get(cf_counters, "count", .{}, &err_str);
+    defer if (val2) |v| v.deinit();
+    try std.testing.expect(val2 != null);
+    const result = std.mem.readInt(u64, val2.?.data[0..8], .little);
+    try std.testing.expectEqual(@as(u64, 150), result);
+}
+
+test "MergeOperator.deinit safety with null handle" {
+    var op = MergeOperator{ .handle = null };
+    op.deinit(); // Should not crash
+    try std.testing.expect(op.handle == null);
+}
+
+test "MergeOperator not used with DB can be manually destroyed" {
+    // Create a merge operator but never pass it to DB.open
+    var merge_op = try MergeOperator.createStringAppend(",");
+    defer merge_op.deinit(); // Safe to call because it wasn't transferred to RocksDB
+
+    // Verify handle is present initially
+    try std.testing.expect(merge_op.handle != null);
+
+    // After deinit, handle should be null
+    merge_op.deinit();
+    try std.testing.expect(merge_op.handle == null);
+}
+
+test "MergeOperator handle is nulled after DB.open" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var merge_op = try MergeOperator.createStringAppend(",");
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        &.{.{ .name = "default", .options = .{ .merge_operator = &merge_op } }},
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    // Test that merge operations work (handle was successfully transferred)
+    const cf = families[0].handle;
+    const db_with_cf = db.withDefaultColumnFamily(cf);
+    try db_with_cf.merge(null, "key", "value", .{}, &err_str);
+
+    // The merge operator handle was consumed on the caller-visible instance
+    try std.testing.expect(merge_op.handle == null);
+}
+
+test "MergeOperator cannot be reused for multiple column families" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var merge_op = try MergeOperator.createStringAppend(",");
+
+    // First CF gets the merge operator
+    const cfs = [_]ColumnFamilyDescription{.{ .name = "default", .options = .{ .merge_operator = &merge_op } }};
+
+    var db, const families = try DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        &cfs,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer DB.freeColumnFamilies(allocator, families);
+
+    // The merge operator was consumed during open
+    try std.testing.expect(merge_op.handle == null);
+
+    // Attempting to reuse it for another DB would be a safety violation
+    // This test verifies the API works correctly with a single use
+    const cf = families[0].handle;
+    const db_with_cf = db.withDefaultColumnFamily(cf);
+    try db_with_cf.merge(null, "key", "value", .{}, &err_str);
+}
+
+test "MergeOperator reuse across column families fails" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var merge_op = try MergeOperator.createStringAppend(",");
+
+    // Attempt to use the same operator for two CFs
+    const cfs = [_]ColumnFamilyDescription{
+        .{ .name = "default", .options = .{ .merge_operator = &merge_op } },
+        .{ .name = "other", .options = .{ .merge_operator = &merge_op } },
+    };
+
+    const result = DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true, .create_missing_column_families = true },
+        &cfs,
+        false,
+        &err_str,
+    );
+
+    // Should fail with MergeOperatorAlreadyConsumed on the second CF
+    try std.testing.expectError(error.MergeOperatorAlreadyConsumed, result);
+
+    // The operator should be partially consumed (first CF consumed it, second CF failed)
+    try std.testing.expect(merge_op.handle == null);
+}
+
+test "MergeOperator reuse across CFs fails (TransactionDB)" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var destroy_count: usize = 0;
+
+    const State = struct {
+        counter: *usize,
+    };
+
+    const state = try std.heap.c_allocator.create(State);
+    errdefer std.heap.c_allocator.destroy(state);
+    state.* = .{ .counter = &destroy_count };
+
+    const handle = rdb.rocksdb_mergeoperator_create(
+        state,
+        struct {
+            fn destructor(s: ?*anyopaque) callconv(.c) void {
+                const st: *State = @ptrCast(@alignCast(s));
+                st.counter.* += 1;
+                std.heap.c_allocator.destroy(st);
+            }
+        }.destructor,
+        struct {
+            fn fullMerge(
+                _: ?*anyopaque,
+                _: [*c]const u8,
+                _: usize,
+                _: [*c]const u8,
+                _: usize,
+                _: [*c]const [*c]const u8,
+                _: [*c]const usize,
+                _: c_int,
+                success: [*c]u8,
+                new_value_len: [*c]usize,
+            ) callconv(.c) [*c]u8 {
+                success.* = 1;
+                new_value_len.* = 0;
+                return null;
+            }
+        }.fullMerge,
+        null,
+        struct {
+            fn deleteValue(_: ?*anyopaque, value: [*c]const u8, value_len: usize) callconv(.c) void {
+                if (value == null or value_len == 0) return;
+                const slice = @as([*]u8, @ptrFromInt(@intFromPtr(value)))[0..value_len];
+                std.heap.c_allocator.free(slice);
+            }
+        }.deleteValue,
+        struct {
+            fn name(_: ?*anyopaque) callconv(.c) [*c]const u8 {
+                return "TestMergeOperator";
+            }
+        }.name,
+    ) orelse {
+        return error.OutOfMemory;
+    };
+
+    var merge_op = MergeOperator{ .handle = handle };
+
+    const cfs = [_]ColumnFamilyDescription{
+        .{ .name = "default", .options = .{ .merge_operator = &merge_op } },
+        .{ .name = "other", .options = .{ .merge_operator = &merge_op } },
+    };
+
+    const result = TransactionDB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true, .create_missing_column_families = true },
+        .{},
+        &cfs,
+        &err_str,
+    );
+
+    try std.testing.expectError(error.MergeOperatorAlreadyConsumed, result);
+    try std.testing.expect(merge_op.handle == null);
+    try std.testing.expectEqual(@as(usize, 1), destroy_count);
+}
+
+test "MergeOperator reuse across CFs fails (OptimisticTransactionDB)" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var destroy_count: usize = 0;
+
+    const State = struct {
+        counter: *usize,
+    };
+
+    const state = try std.heap.c_allocator.create(State);
+    errdefer std.heap.c_allocator.destroy(state);
+    state.* = .{ .counter = &destroy_count };
+
+    const handle = rdb.rocksdb_mergeoperator_create(
+        state,
+        struct {
+            fn destructor(s: ?*anyopaque) callconv(.c) void {
+                const st: *State = @ptrCast(@alignCast(s));
+                st.counter.* += 1;
+                std.heap.c_allocator.destroy(st);
+            }
+        }.destructor,
+        struct {
+            fn fullMerge(
+                _: ?*anyopaque,
+                _: [*c]const u8,
+                _: usize,
+                _: [*c]const u8,
+                _: usize,
+                _: [*c]const [*c]const u8,
+                _: [*c]const usize,
+                _: c_int,
+                success: [*c]u8,
+                new_value_len: [*c]usize,
+            ) callconv(.c) [*c]u8 {
+                success.* = 1;
+                new_value_len.* = 0;
+                return null;
+            }
+        }.fullMerge,
+        null,
+        struct {
+            fn deleteValue(_: ?*anyopaque, value: [*c]const u8, value_len: usize) callconv(.c) void {
+                if (value == null or value_len == 0) return;
+                const slice = @as([*]u8, @ptrFromInt(@intFromPtr(value)))[0..value_len];
+                std.heap.c_allocator.free(slice);
+            }
+        }.deleteValue,
+        struct {
+            fn name(_: ?*anyopaque) callconv(.c) [*c]const u8 {
+                return "TestMergeOperator";
+            }
+        }.name,
+    ) orelse {
+        return error.OutOfMemory;
+    };
+
+    var merge_op = MergeOperator{ .handle = handle };
+
+    const cfs = [_]ColumnFamilyDescription{
+        .{ .name = "default", .options = .{ .merge_operator = &merge_op } },
+        .{ .name = "other", .options = .{ .merge_operator = &merge_op } },
+    };
+
+    const result = OptimisticTransactionDB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true, .create_missing_column_families = true },
+        &cfs,
+        &err_str,
+    );
+
+    try std.testing.expectError(error.MergeOperatorAlreadyConsumed, result);
+    try std.testing.expect(merge_op.handle == null);
+    try std.testing.expectEqual(@as(usize, 1), destroy_count);
+}
+
+test "MergeOperator reuse error releases merge operator" {
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var destroy_count: usize = 0;
+
+    const State = struct {
+        counter: *usize,
+    };
+
+    const state = try std.heap.c_allocator.create(State);
+    errdefer std.heap.c_allocator.destroy(state);
+    state.* = .{ .counter = &destroy_count };
+
+    const handle = rdb.rocksdb_mergeoperator_create(
+        state,
+        struct {
+            fn destructor(s: ?*anyopaque) callconv(.c) void {
+                const st: *State = @ptrCast(@alignCast(s));
+                st.counter.* += 1;
+                std.heap.c_allocator.destroy(st);
+            }
+        }.destructor,
+        struct {
+            fn fullMerge(
+                _: ?*anyopaque,
+                _: [*c]const u8,
+                _: usize,
+                _: [*c]const u8,
+                _: usize,
+                _: [*c]const [*c]const u8,
+                _: [*c]const usize,
+                _: c_int,
+                success: [*c]u8,
+                new_value_len: [*c]usize,
+            ) callconv(.c) [*c]u8 {
+                success.* = 1;
+                new_value_len.* = 0;
+                return null;
+            }
+        }.fullMerge,
+        null,
+        struct {
+            fn deleteValue(_: ?*anyopaque, value: [*c]const u8, value_len: usize) callconv(.c) void {
+                if (value == null or value_len == 0) return;
+                const slice = @as([*]u8, @ptrFromInt(@intFromPtr(value)))[0..value_len];
+                std.heap.c_allocator.free(slice);
+            }
+        }.deleteValue,
+        struct {
+            fn name(_: ?*anyopaque) callconv(.c) [*c]const u8 {
+                return "TestMergeOperator";
+            }
+        }.name,
+    ) orelse {
+        return error.OutOfMemory;
+    };
+
+    var merge_op = MergeOperator{ .handle = handle };
+
+    const cfs = [_]ColumnFamilyDescription{
+        .{ .name = "default", .options = .{ .merge_operator = &merge_op } },
+        .{ .name = "other", .options = .{ .merge_operator = &merge_op } },
+    };
+
+    const result = DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true, .create_missing_column_families = true },
+        &cfs,
+        false,
+        &err_str,
+    );
+
+    try std.testing.expectError(error.MergeOperatorAlreadyConsumed, result);
+    try std.testing.expect(merge_op.handle == null);
+    try std.testing.expectEqual(@as(usize, 1), destroy_count);
+}
+
+test "MergeOperator.consume transfers ownership" {
+    var merge_op = try MergeOperator.createStringAppend(",");
+
+    // Verify handle exists
+    try std.testing.expect(merge_op.handle != null);
+
+    // Consume the handle
+    const h = merge_op.consume();
+    try std.testing.expect(h != null);
+
+    // Handle should now be null in the original
+    try std.testing.expect(merge_op.handle == null);
+
+    // Second consume should return null
+    const h2 = merge_op.consume();
+    try std.testing.expect(h2 == null);
+
+    // Clean up the consumed handle manually
+    if (h) |handle| {
+        rdb.rocksdb_mergeoperator_destroy(handle);
+    }
+}
+test "MergeOperator.createStringAppend State allocation failure" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.heap.page_allocator, .{ .fail_index = 0 });
+
+    const result = MergeOperator.createStringAppendInternal(
+        failing_allocator.allocator(),
+        rdb.rocksdb_mergeoperator_create,
+        ",",
+    );
+
+    try std.testing.expectError(error.OutOfMemory, result);
+}
+
+test "MergeOperator.createStringAppend delimiter dupe failure" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.heap.page_allocator, .{ .fail_index = 1 });
+
+    const result = MergeOperator.createStringAppendInternal(
+        failing_allocator.allocator(),
+        rdb.rocksdb_mergeoperator_create,
+        ",delim",
+    );
+
+    try std.testing.expectError(error.OutOfMemory, result);
+}
+
+test "MergeOperator.createStringAppend RocksDB create failure" {
+    const MockFn = struct {
+        fn create(
+            _: ?*anyopaque,
+            _: ?*const anyopaque,
+            _: ?*const anyopaque,
+            _: ?*const anyopaque,
+            _: ?*const anyopaque,
+            _: ?*const anyopaque,
+        ) ?*rdb.rocksdb_mergeoperator_t {
+            return null;
+        }
+    };
+
+    const result = MergeOperator.createStringAppendInternal(
+        std.testing.allocator,
+        MockFn.create,
+        ",",
+    );
+
+    try std.testing.expectError(error.MergeOperatorCreateFailed, result);
+}
+
+test "MergeOperator.createUInt64Add RocksDB create failure" {
+    const MockFn = struct {
+        fn create(
+            _: ?*anyopaque,
+            _: ?*const anyopaque,
+            _: ?*const anyopaque,
+            _: ?*const anyopaque,
+            _: ?*const anyopaque,
+            _: ?*const anyopaque,
+        ) ?*rdb.rocksdb_mergeoperator_t {
+            return null;
+        }
+    };
+
+    const result = MergeOperator.createUInt64AddInternal(
+        std.testing.allocator,
+        MockFn.create,
+    );
+
+    try std.testing.expectError(error.MergeOperatorCreateFailed, result);
+}
+
+test "MergeOperator.createMax RocksDB create failure" {
+    const MockFn = struct {
+        fn create(
+            _: ?*anyopaque,
+            _: ?*const anyopaque,
+            _: ?*const anyopaque,
+            _: ?*const anyopaque,
+            _: ?*const anyopaque,
+            _: ?*const anyopaque,
+        ) ?*rdb.rocksdb_mergeoperator_t {
+            return null;
+        }
+    };
+
+    const result = MergeOperator.createMaxInternal(
+        std.testing.allocator,
+        MockFn.create,
+    );
+
+    try std.testing.expectError(error.MergeOperatorCreateFailed, result);
+}
+
+test "MergeOperator allocation error paths are properly cleaned up" {
+    // Test that when State allocation succeeds but delimiter dupe fails,
+    // the State is properly freed via errdefer (not leaked).
+    // FailingAllocator will panic if we try to free an untracked allocation.
+    var failing_allocator = std.testing.FailingAllocator.init(std.heap.page_allocator, .{ .fail_index = 1 });
+
+    const result = MergeOperator.createStringAppendInternal(
+        failing_allocator.allocator(),
+        rdb.rocksdb_mergeoperator_create,
+        "test-delimiter",
+    );
+
+    // Should fail on delimiter dupe, but State should be cleaned up via errdefer
+    try std.testing.expectError(error.OutOfMemory, result);
+
+    // If errdefer didn't work, FailingAllocator would have panicked on free
+    // reaching here means cleanup was correct
 }

@@ -8,10 +8,11 @@ The wrapper provides basic key-value operations with column families. It's suita
 
 **Currently Wrapped:**
 
-- ✅ Basic operations (put, get, delete)
+- ✅ Basic operations (put, get, delete, merge)
 - ✅ Column families (create, basic lookup)
 - ✅ Iterators (forward/reverse)
 - ✅ Write batches
+- ✅ Merge operators (StringAppend, UInt64Add, Max + custom callback support)
 - ✅ Basic metadata (liveFiles, properties)
 - ✅ DB.destroy: Delete database from filesystem
 - ✅ DBOptions: Core options + compaction/write performance tuning + block-based table options
@@ -88,9 +89,9 @@ The wrapper provides basic key-value operations with column families. It's suita
 
 ### Merge Operators
 
-- [ ] Basic merge operator support
-- [ ] Associative merge operators
-- [ ] Custom merge logic
+- [x] Basic DB.merge() API method
+- [x] Built-in merge operator wrappers (StringAppend, UInt64Add, Max)
+- [x] Custom merge operator callback support via ColumnFamilyOptions
 
 ### Backup & Recovery
 
@@ -180,11 +181,15 @@ The wrapper provides basic key-value operations with column families. It's suita
 - Add transaction options (isolation/deadlock) or placeholders if C++-only
 - Tests for commit/rollback and concurrency
 
-1. **Merge Operators**
+1. **Merge Operators** ✅ COMPLETE
 
-- Built-in associative merge operators
-- Custom merge logic if/when C API exposes hooks
-- Tests for merge correctness
+- MergeOperator type with proper lifetime management and move semantics
+- Built-in merge operators: StringAppend (with delimiter), UInt64Add, Max
+- Full integration with ColumnFamilyOptions
+- Safety features: memory leak prevention, double-free protection, null handle safety
+- Comprehensive test coverage for all merge operators (94 total tests)
+- Multi-CF support with different merge operators per CF
+- Documentation of performance characteristics (full merge only, no partial merge)
 
 1. **TTL & Cleanup**
 
@@ -315,7 +320,7 @@ This approach provides:
 - 🚧 Work in progress
 - ❌ Not feasible / not applicable
 
-**Last Updated:** January 30, 2026 (Comprehensive test suite, Priority 2 complete with compaction/performance + bloom/index options)
+**Last Updated:** February 2, 2026 (Comprehensive test suite with 94 tests; Priority 2 complete with compaction/performance + bloom/index options; Priority 3 merge operators fully implemented with StringAppend/UInt64Add/Max + safety features)
 
 **Priority 1: ✅ COMPLETE** - All critical options and configuration features implemented
 **Priority 2: ✅ COMPLETE** - All core performance features implemented

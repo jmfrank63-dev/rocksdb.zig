@@ -9,6 +9,7 @@ pub const ColumnFamilyOptions = database.ColumnFamilyOptions;
 pub const Compression = database.Compression;
 pub const CompressionOptions = database.CompressionOptions;
 pub const BlockCacheOptions = database.BlockCacheOptions;
+pub const MergeOperator = database.MergeOperator;
 pub const DB = database.DB;
 pub const DBOptions = database.DBOptions;
 pub const TransactionDB = database.TransactionDB;
