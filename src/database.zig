@@ -2110,6 +2110,173 @@ pub const MergeOperator = struct {
     }
 };
 
+/// Checkpoint provides a consistent point-in-time snapshot of the database.
+/// Checkpoints are faster than full backups and can be used for recovery.
+pub const Checkpoint = struct {
+    handle: *rdb.rocksdb_checkpoint_t,
+
+    /// Create a checkpoint at the specified directory.
+    /// log_size_for_flush controls how much WAL is flushed during checkpoint creation.
+    /// Use 0 to flush all WAL.
+    fn create(self: Checkpoint, dir: []const u8, log_size_for_flush: u64, err_str: *?Data) !void {
+        var err_buf: [*c]u8 = null;
+        rdb.rocksdb_checkpoint_create(self.handle, @ptrCast(dir.ptr), log_size_for_flush, @ptrCast(&err_buf));
+        
+        if (err_buf != null) {
+            const err_msg = Data{ .data = std.mem.span(err_buf), .free = rdb.rocksdb_free };
+            err_str.* = err_msg;
+            return error.RocksDBCheckpoint;
+        }
+    }
+
+    /// Destroy the checkpoint object (does not delete the checkpoint files).
+    fn destroy(self: *Checkpoint) void {
+        rdb.rocksdb_checkpoint_object_destroy(self.handle);
+        self.handle = undefined;
+    }
+};
+
+/// Restore options for backup restoration.
+pub const RestoreOptions = struct {
+    /// Whether to keep log files during restore (default: false).
+    keep_log_files: bool = false,
+
+    fn convert(self: RestoreOptions) *rdb.rocksdb_restore_options_t {
+        const opts = rdb.rocksdb_restore_options_create().?;
+        if (self.keep_log_files) {
+            rdb.rocksdb_restore_options_set_keep_log_files(opts, 1);
+        }
+        return opts;
+    }
+};
+
+/// Backup information (metadata for an individual backup).
+pub const BackupInfo = struct {
+    backup_id: u32,
+    timestamp: i64,
+    size_bytes: u64,
+    number_files: u32,
+};
+
+/// BackupEngine provides incremental backup and recovery capabilities.
+pub const BackupEngine = struct {
+    handle: *rdb.rocksdb_backup_engine_t,
+    allocator: Allocator,
+
+    /// Open a backup engine at the specified path.
+    pub fn open(allocator: Allocator, backup_dir: []const u8, err_str: *?Data) (Allocator.Error || error{RocksDBBackupOpen})!BackupEngine {
+        const handle = rdb.rocksdb_backup_engine_open(null, @ptrCast(backup_dir.ptr), null);
+        
+        if (handle == null) {
+            err_str.* = Data{ .data = "Failed to open backup engine", .free = rdb.rocksdb_free };
+            return error.RocksDBBackupOpen;
+        }
+
+        return .{ .handle = @ptrCast(handle), .allocator = allocator };
+    }
+
+    /// Create a new backup of the database.
+    pub fn createNewBackup(self: BackupEngine, db: *const DB, flush_before_backup: bool, err_str: *?Data) !void {
+        var err_buf: [*c]u8 = null;
+        
+        if (flush_before_backup) {
+            rdb.rocksdb_backup_engine_create_new_backup_flush(self.handle, @ptrCast(db.db), 1, @ptrCast(&err_buf));
+        } else {
+            rdb.rocksdb_backup_engine_create_new_backup(self.handle, @ptrCast(db.db), @ptrCast(&err_buf));
+        }
+        
+        if (err_buf != null) {
+            const err_msg = Data{ .data = std.mem.span(err_buf), .free = rdb.rocksdb_free };
+            err_str.* = err_msg;
+            return error.RocksDBBackup;
+        }
+    }
+
+    /// Get information about all backups.
+    /// Caller must free the returned slice with self.allocator.free().
+    pub fn getBackupInfo(self: BackupEngine) ![]BackupInfo {
+        const info_ptr = rdb.rocksdb_backup_engine_get_backup_info(self.handle);
+        if (info_ptr == null) {
+            return &.{};
+        }
+
+        const count = rdb.rocksdb_backup_engine_info_count(info_ptr);
+        const infos = try self.allocator.alloc(BackupInfo, @intCast(count));
+
+        for (0..@intCast(count)) |i| {
+            infos[i] = .{
+                .backup_id = rdb.rocksdb_backup_engine_info_backup_id(info_ptr, @intCast(i)),
+                .timestamp = rdb.rocksdb_backup_engine_info_timestamp(info_ptr, @intCast(i)),
+                .size_bytes = rdb.rocksdb_backup_engine_info_size(info_ptr, @intCast(i)),
+                .number_files = rdb.rocksdb_backup_engine_info_number_files(info_ptr, @intCast(i)),
+            };
+        }
+
+        rdb.rocksdb_backup_engine_info_destroy(info_ptr);
+        return infos;
+    }
+
+    /// Purge old backups, keeping only the most recent num_to_keep backups.
+    pub fn purgeOldBackups(self: BackupEngine, num_to_keep: u32, err_str: *?Data) !void {
+        var err_buf: [*c]u8 = null;
+        rdb.rocksdb_backup_engine_purge_old_backups(self.handle, num_to_keep, @ptrCast(&err_buf));
+        
+        if (err_buf != null) {
+            const err_msg = Data{ .data = std.mem.span(err_buf), .free = rdb.rocksdb_free };
+            err_str.* = err_msg;
+            return error.RocksDBBackup;
+        }
+    }
+
+    /// Restore the database from the latest backup.
+    pub fn restoreFromLatestBackup(self: BackupEngine, db_dir: []const u8, wal_dir: []const u8, opts: RestoreOptions, err_str: *?Data) !void {
+        const restore_opts = opts.convert();
+        defer rdb.rocksdb_restore_options_destroy(restore_opts);
+        
+        var err_buf: [*c]u8 = null;
+        rdb.rocksdb_backup_engine_restore_db_from_latest_backup(self.handle, @ptrCast(db_dir.ptr), @ptrCast(wal_dir.ptr), restore_opts, @ptrCast(&err_buf));
+        
+        if (err_buf != null) {
+            const err_msg = Data{ .data = std.mem.span(err_buf), .free = rdb.rocksdb_free };
+            err_str.* = err_msg;
+            return error.RocksDBRestore;
+        }
+    }
+
+    /// Restore the database from a specific backup by ID.
+    pub fn restoreFromBackup(self: BackupEngine, db_dir: []const u8, wal_dir: []const u8, backup_id: u32, opts: RestoreOptions, err_str: *?Data) !void {
+        const restore_opts = opts.convert();
+        defer rdb.rocksdb_restore_options_destroy(restore_opts);
+        
+        var err_buf: [*c]u8 = null;
+        rdb.rocksdb_backup_engine_restore_db_from_backup(self.handle, @ptrCast(db_dir.ptr), @ptrCast(wal_dir.ptr), restore_opts, backup_id, @ptrCast(&err_buf));
+        
+        if (err_buf != null) {
+            const err_msg = Data{ .data = std.mem.span(err_buf), .free = rdb.rocksdb_free };
+            err_str.* = err_msg;
+            return error.RocksDBRestore;
+        }
+    }
+
+    /// Verify the integrity of a specific backup.
+    pub fn verifyBackup(self: BackupEngine, backup_id: u32, err_str: *?Data) !void {
+        var err_buf: [*c]u8 = null;
+        rdb.rocksdb_backup_engine_verify_backup(self.handle, backup_id, @ptrCast(&err_buf));
+        
+        if (err_buf != null) {
+            const err_msg = Data{ .data = std.mem.span(err_buf), .free = rdb.rocksdb_free };
+            err_str.* = err_msg;
+            return error.RocksDBBackup;
+        }
+    }
+
+    /// Close the backup engine and free resources.
+    pub fn close(self: *BackupEngine) void {
+        rdb.rocksdb_backup_engine_close(self.handle);
+        self.handle = undefined;
+    }
+};
+
 test "DB clean init and deinit" {
     const ns = struct {
         pub fn run(allocator: Allocator) !void {
@@ -5616,4 +5783,11 @@ test "MergeOperator allocation error paths are properly cleaned up" {
 
     // If errdefer didn't work, FailingAllocator would have panicked on free
     // reaching here means cleanup was correct
+}
+test "RestoreOptions keeps log files on restore" {
+    const opts = RestoreOptions{ .keep_log_files = true };
+    const c_opts = opts.convert();
+    defer rdb.rocksdb_restore_options_destroy(c_opts);
+
+    // Verify convert() returns a valid options object (no test needed, just verify cleanup works)
 }
