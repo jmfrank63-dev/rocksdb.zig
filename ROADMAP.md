@@ -15,6 +15,8 @@ The wrapper provides basic key-value operations with column families. It's suita
 - ✅ Merge operators (StringAppend, UInt64Add, Max + custom callback support)
 - ✅ Basic metadata (liveFiles, properties)
 - ✅ DB.destroy: Delete database from filesystem
+- ✅ Checkpoint: Consistent point-in-time snapshots
+- ✅ BackupEngine: Incremental backups with rotation and restore
 - ✅ DBOptions: Core options + compaction/write performance tuning + block-based table options
 - ⏳ DynamicDBOptions: 3 options pending C API (max_manifest_space_amp_pct, target_file_size_is_upper_bound, allow_trivial_move)
 - ✅ ReadOptions: 6 options (verify_checksums, fill_cache, tailing, readahead_size, snapshot, and defaults)
@@ -95,9 +97,9 @@ The wrapper provides basic key-value operations with column families. It's suita
 
 ### Backup & Recovery
 
-- [ ] `BackupEngine` - Incremental backups
-- [ ] `Checkpoint` - Consistent snapshots
-- [ ] Restore from backup
+- [x] `BackupEngine` - Incremental backups with getBackupInfo, purgeOldBackups, verifyBackup
+- [x] `Checkpoint` - Consistent snapshots with configurable WAL flushing
+- [x] Restore from backup - restoreFromLatestBackup and restoreFromBackup with RestoreOptions
 
 ### Batch Operations
 
@@ -169,11 +171,12 @@ The wrapper provides basic key-value operations with column families. It's suita
 - Add statistics + histogram accessors
 - Tests verifying properties and counters return data
 
-1. **Backup & Recovery**
+1. **Backup & Recovery** ✅ COMPLETE
 
-- Wrap `Checkpoint` and `BackupEngine`
-- Add restore flow
-- Tests for checkpoint/backup/restore
+- ✅ Checkpoint wrapper: create(), destroy() with configurable WAL flushing
+- ✅ BackupEngine wrapper: open(), createNewBackup(), getBackupInfo(), purgeOldBackups(), verifyBackup(), close()
+- ✅ Restore flow: restoreFromLatestBackup(), restoreFromBackup() with RestoreOptions
+- ✅ RestoreOptions: keep_log_files option with convert() helper
 
 1. **Transactions**
 
@@ -320,7 +323,8 @@ This approach provides:
 - 🚧 Work in progress
 - ❌ Not feasible / not applicable
 
-**Last Updated:** February 2, 2026 (Comprehensive test suite with 94 tests; Priority 2 complete with compaction/performance + bloom/index options; Priority 3 merge operators fully implemented with StringAppend/UInt64Add/Max + safety features)
+**Last Updated:** February 3, 2026 (Test suite: 108 tests passing; Priority 1 & 2 complete; Priority 3 now includes transactions, merge operators, and backup & recovery)
 
 **Priority 1: ✅ COMPLETE** - All critical options and configuration features implemented
 **Priority 2: ✅ COMPLETE** - All core performance features implemented
+**Priority 3 Progress: ✅ Transactions, ✅ Merge Operators, ✅ Backup & Recovery | ⏳ Batch Operations
