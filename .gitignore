@@ -2,3 +2,5 @@
 /zig-out
 /test-state
 /.vscode
+/test_cpp
+/report_issue

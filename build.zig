@@ -13,8 +13,14 @@ pub fn build(b: *Build) !void {
         "Enables and builds with the Snappy compressor",
     ) orelse false;
 
+    const use_msvc_lib = b.option(
+        bool,
+        "use_msvc_lib",
+        "Use pre-built MSVC library from test_cpp/build_rocksdb/Release (requires -Dtarget=native-windows-msvc)",
+    ) orelse false;
+
     // RocksDB's translate-c module
-    const rocksdb_mod = try addRocksDB(b, target, optimize, enable_snappy);
+    const rocksdb_mod = try addRocksDB(b, target, optimize, enable_snappy, use_msvc_lib);
     const bindings_mod = b.addModule("bindings", .{
         .target = target,
         .optimize = optimize,
@@ -22,9 +28,19 @@ pub fn build(b: *Build) !void {
     });
     bindings_mod.addImport("rocksdb", rocksdb_mod);
 
-    const tests = b.addTest(.{ .root_module = bindings_mod });
+    const test_optimize = if (use_msvc_lib) optimize else optimize; // Use same optimize mode
+
+    const bindings_mod_for_test = b.addModule("bindings", .{
+        .target = target,
+        .optimize = test_optimize,
+        .root_source_file = b.path("src/lib.zig"),
+    });
+    bindings_mod_for_test.addImport("rocksdb", rocksdb_mod);
+
+    const tests = b.addTest(.{
+        .root_module = bindings_mod_for_test,
+    });
     const test_step = b.step("test", "Run bindings tests");
-    tests.root_module.addImport("rocksdb", rocksdb_mod);
     test_step.dependOn(&b.addRunArtifact(tests).step);
 }
 
@@ -35,6 +51,7 @@ fn addRocksDB(
     target: ResolvedTarget,
     optimize: OptimizeMode,
     enable_snappy: bool,
+    use_msvc_lib: bool,
 ) !*Build.Module {
     const rocks_dep = b.dependency("rocksdb", .{});
 
@@ -43,6 +60,35 @@ fn addRocksDB(
         .target = target,
         .optimize = optimize,
     });
+
+    // Use pre-built MSVC library when targeting MSVC ABI
+    if (use_msvc_lib) {
+        if (target.result.abi != .msvc) {
+            std.debug.print("WARNING: -Duse_msvc_lib requires -Dtarget=native-windows-msvc\n", .{});
+            return error.InvalidTarget;
+        }
+
+        std.debug.print("Using pre-built MSVC RocksDB library from test_cpp/build_rocksdb/Release\n", .{});
+
+        // Create module WITHOUT libc++ (MSVC uses its own C++ stdlib)
+        const mod = b.addModule("rocksdb", .{
+            .root_source_file = translate_c.getOutput(),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            // Do NOT link libc++ - MSVC has its own C++ standard library
+        });
+
+        // Link the MSVC-built RELEASE static library
+        mod.addObjectFile(b.path("test_cpp/build_rocksdb/Release/rocksdb.lib"));
+
+        // Add include paths for headers
+        mod.addIncludePath(rocks_dep.path("include"));
+
+        return mod;
+    }
+
+    // Default path: build from source with libc++
     const mod = b.addModule("rocksdb", .{
         .root_source_file = translate_c.getOutput(),
         .target = target,

@@ -2169,18 +2169,25 @@ pub const BackupInfo = struct {
 /// BackupEngine provides incremental backup and recovery capabilities.
 pub const BackupEngine = struct {
     handle: *rdb.rocksdb_backup_engine_t,
+    options: *rdb.rocksdb_options_t,
     allocator: Allocator,
 
     /// Open a backup engine at the specified path.
     pub fn open(allocator: Allocator, backup_dir: []const u8, err_str: *?Data) (Allocator.Error || error{RocksDBBackupOpen})!BackupEngine {
         const db_opts = rdb.rocksdb_options_create().?;
-        defer rdb.rocksdb_options_destroy(db_opts);
+        errdefer rdb.rocksdb_options_destroy(db_opts);
+
+        // Disable block cache to avoid lifecycle issues with shared cache references
+        const table_opts = rdb.rocksdb_block_based_options_create();
+        defer rdb.rocksdb_block_based_options_destroy(table_opts);
+        rdb.rocksdb_block_based_options_set_no_block_cache(table_opts, 1);
+        rdb.rocksdb_options_set_block_based_table_factory(db_opts, table_opts);
 
         var ch = CallHandler.init(err_str);
         const handle = rdb.rocksdb_backup_engine_open(db_opts, @ptrCast(backup_dir.ptr), ch.errIn());
         const checked = try ch.handle(handle, error.RocksDBBackupOpen);
 
-        return .{ .handle = checked.?, .allocator = allocator };
+        return .{ .handle = checked.?, .options = db_opts, .allocator = allocator };
     }
 
     /// Create a new backup of the database.
@@ -2282,8 +2289,11 @@ pub const BackupEngine = struct {
 
     /// Close the backup engine and free resources.
     pub fn close(self: *BackupEngine) void {
+        // Close backup engine first, then destroy options
         rdb.rocksdb_backup_engine_close(self.handle);
+        rdb.rocksdb_options_destroy(self.options);
         self.handle = undefined;
+        self.options = undefined;
     }
 };
 
@@ -5858,7 +5868,10 @@ test "BackupEngine.createNewBackup creates incremental backup" {
     var db, const families = try DB.open(
         allocator,
         db_path,
-        .{ .create_if_missing = true },
+        .{
+            .create_if_missing = true,
+            .block_cache = .{ .size_bytes = 0 }, // Disable cache to avoid lifecycle issues
+        },
         null,
         false,
         &err_str,
@@ -6024,18 +6037,356 @@ test "BackupEngine.verifyBackup checks backup integrity" {
     try backup_engine.verifyBackup(1, &err_str);
 }
 
-// NOTE: Restore operation tests are disabled due to flaky RocksDB debug-mode assertions.
-// The restore APIs (restoreFromLatestBackup, restoreFromBackup, RestoreOptions) are fully
-// implemented and functional, but trigger intermittent reference counting assertions in
-// RocksDB's internal clock_cache.cc (line 2086: GetRefcount(h.meta.LoadRelaxed()) == 0).
-//
-// The issue appears to be in RocksDB's debug builds when opening/closing BackupEngine with
-// block cache enabled. Tests pass reliably in release mode (--release=fast/safe).
-//
-// Restore API coverage:
-// - BackupEngine.restoreFromLatestBackup(db_dir, wal_dir, opts, err_str)
-// - BackupEngine.restoreFromBackup(db_dir, wal_dir, backup_id, opts, err_str)
-// - RestoreOptions{ .keep_log_files = bool }
-//
-// To manually test restore functionality, run: zig build test --release=fast
+// MINIMAL RESTORE TEST - does the absolute minimum to trigger the issue
+test "BackupEngine MINIMAL restore test" {
+    const allocator = std.testing.allocator;
+    var db_dir = std.testing.tmpDir(.{});
+    defer db_dir.cleanup();
+    const db_path = try db_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(db_path);
 
+    var backup_dir = std.testing.tmpDir(.{});
+    defer backup_dir.cleanup();
+    const backup_path = try backup_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(backup_path);
+
+    var restore_dir = std.testing.tmpDir(.{});
+    defer restore_dir.cleanup();
+    const restore_base = try restore_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(restore_base);
+    // THIS IS THE KEY DIFFERENCE - full test uses a subdirectory!
+    const restore_path = try std.fs.path.join(allocator, &.{ restore_base, "restored_db" });
+    defer allocator.free(restore_path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // Create DB, create backup, close everything
+    {
+        var db, const families = try DB.open(
+            allocator,
+            db_path,
+            .{
+                .create_if_missing = true,
+                .block_cache = .{ .size_bytes = 0 },
+            },
+            null,
+            false,
+            &err_str,
+        );
+        defer db.deinit();
+        defer DB.freeColumnFamilies(allocator, families);
+
+        const cf = families[0].handle;
+        db = db.withDefaultColumnFamily(cf);
+
+        try db.put(null, "k", "v", .{}, &err_str);
+
+        var backup_engine = try BackupEngine.open(allocator, backup_path, &err_str);
+        defer backup_engine.close();
+
+        try backup_engine.createNewBackup(&db, true, &err_str);
+    }
+
+    // NOW DO THE RESTORE - this should hit the assertion
+    {
+        var backup_engine = try BackupEngine.open(allocator, backup_path, &err_str);
+        defer backup_engine.close(); // Assertion should trigger HERE when we close
+
+        try backup_engine.restoreFromLatestBackup(restore_path, restore_path, .{}, &err_str);
+    } // <-- Does this trigger? NO!
+
+    // AHA! Maybe the issue is opening the RESTORED database afterward?
+    {
+        var db, const families = try DB.open(
+            allocator,
+            restore_path,
+            .{
+                .create_if_missing = false,
+                .block_cache = .{ .size_bytes = 0 },
+            },
+            null,
+            false,
+            &err_str,
+        );
+        defer db.deinit();
+        defer DB.freeColumnFamilies(allocator, families);
+
+        const cf = families[0].handle;
+        db = db.withDefaultColumnFamily(cf);
+
+        // Add data verification like the full test
+        const val = try db.get(null, "k", .{}, &err_str);
+        defer if (val) |v| v.deinit();
+        try std.testing.expect(val != null);
+        try std.testing.expectEqualSlices(u8, "v", val.?.data);
+    } // <-- Does the assertion trigger HERE when closing the restored DB?
+}
+
+test "BackupEngine.restoreFromLatestBackup restores data correctly" {
+    // RE-ENABLED TO CONFIRM IT STILL FAILS
+    const allocator = std.testing.allocator;
+    var db_dir = std.testing.tmpDir(.{});
+    defer db_dir.cleanup();
+    const db_path = try db_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(db_path);
+
+    var backup_dir = std.testing.tmpDir(.{});
+    defer backup_dir.cleanup();
+    const backup_path = try backup_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(backup_path);
+
+    var restore_dir = std.testing.tmpDir(.{});
+    defer restore_dir.cleanup();
+    const restore_base = try restore_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(restore_base);
+    const restore_path = try std.fs.path.join(allocator, &.{ restore_base, "restored_db" });
+    defer allocator.free(restore_path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // Create and populate database
+    {
+        var db, const families = try DB.open(
+            allocator,
+            db_path,
+            .{
+                .create_if_missing = true,
+                .block_cache = .{ .size_bytes = 0 }, // Disable cache
+            },
+            null,
+            false,
+            &err_str,
+        );
+        defer db.deinit();
+        defer DB.freeColumnFamilies(allocator, families);
+
+        const cf = families[0].handle;
+        db = db.withDefaultColumnFamily(cf);
+
+        try db.put(null, "restore_key1", "restore_value1", .{}, &err_str);
+        try db.put(null, "restore_key2", "restore_value2", .{}, &err_str);
+
+        // Create backup
+        var backup_engine = try BackupEngine.open(allocator, backup_path, &err_str);
+        defer backup_engine.close();
+
+        try backup_engine.createNewBackup(&db, true, &err_str);
+    }
+
+    // Restore from latest backup
+    {
+        var backup_engine = try BackupEngine.open(allocator, backup_path, &err_str);
+        defer backup_engine.close();
+
+        try backup_engine.restoreFromLatestBackup(restore_path, restore_path, .{}, &err_str);
+    }
+
+    // Verify restored data
+    {
+        var db, const families = try DB.open(
+            allocator,
+            restore_path,
+            .{
+                .create_if_missing = false,
+                .block_cache = .{ .size_bytes = 0 }, // Disable cache
+            },
+            null,
+            false,
+            &err_str,
+        );
+        defer db.deinit();
+        defer DB.freeColumnFamilies(allocator, families);
+
+        const cf = families[0].handle;
+        db = db.withDefaultColumnFamily(cf);
+
+        const val1 = try db.get(null, "restore_key1", .{}, &err_str);
+        defer if (val1) |v| v.deinit();
+        try std.testing.expect(val1 != null);
+        try std.testing.expectEqualSlices(u8, "restore_value1", val1.?.data);
+
+        const val2 = try db.get(null, "restore_key2", .{}, &err_str);
+        defer if (val2) |v| v.deinit();
+        try std.testing.expect(val2 != null);
+        try std.testing.expectEqualSlices(u8, "restore_value2", val2.?.data);
+    }
+}
+
+test "BackupEngine.restoreFromBackup restores specific backup by ID" {
+    if (true) return error.SkipZigTest; // TEMPORARILY DISABLED FOR INVESTIGATION
+    const allocator = std.testing.allocator;
+    var db_dir = std.testing.tmpDir(.{});
+    defer db_dir.cleanup();
+    const db_path = try db_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(db_path);
+
+    var backup_dir = std.testing.tmpDir(.{});
+    defer backup_dir.cleanup();
+    const backup_path = try backup_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(backup_path);
+
+    var restore_dir = std.testing.tmpDir(.{});
+    defer restore_dir.cleanup();
+    const restore_base = try restore_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(restore_base);
+    const restore_path = try std.fs.path.join(allocator, &.{ restore_base, "restored_db" });
+    defer allocator.free(restore_path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // Create database and multiple backups
+    {
+        var db, const families = try DB.open(
+            allocator,
+            db_path,
+            .{
+                .create_if_missing = true,
+                .block_cache = .{ .size_bytes = 0 }, // Disable cache
+            },
+            null,
+            false,
+            &err_str,
+        );
+        defer db.deinit();
+        defer DB.freeColumnFamilies(allocator, families);
+
+        const cf = families[0].handle;
+        db = db.withDefaultColumnFamily(cf);
+
+        var backup_engine = try BackupEngine.open(allocator, backup_path, &err_str);
+        defer backup_engine.close();
+
+        // Backup 1: initial data
+        try db.put(null, "key", "version1", .{}, &err_str);
+        try backup_engine.createNewBackup(&db, true, &err_str);
+
+        // Backup 2: updated data
+        try db.put(null, "key", "version2", .{}, &err_str);
+        try backup_engine.createNewBackup(&db, true, &err_str);
+
+        // Verify we have 2 backups
+        const infos = try backup_engine.getBackupInfo();
+        defer allocator.free(infos);
+        try std.testing.expect(infos.len == 2);
+    }
+
+    // Restore from backup ID 1 (first backup with "version1")
+    {
+        var backup_engine = try BackupEngine.open(allocator, backup_path, &err_str);
+        defer backup_engine.close();
+
+        try backup_engine.restoreFromBackup(restore_path, restore_path, 1, .{}, &err_str);
+    }
+
+    // Verify we got the first version
+    {
+        var db, const families = try DB.open(
+            allocator,
+            restore_path,
+            .{
+                .create_if_missing = false,
+                .block_cache = .{ .size_bytes = 0 }, // Disable cache
+            },
+            null,
+            false,
+            &err_str,
+        );
+        defer db.deinit();
+        defer DB.freeColumnFamilies(allocator, families);
+
+        const cf = families[0].handle;
+        db = db.withDefaultColumnFamily(cf);
+
+        const val = try db.get(null, "key", .{}, &err_str);
+        defer if (val) |v| v.deinit();
+        try std.testing.expect(val != null);
+        try std.testing.expectEqualSlices(u8, "version1", val.?.data);
+    }
+}
+
+test "RestoreOptions.keep_log_files preserves WAL during restore" {
+    if (true) return error.SkipZigTest; // TEMPORARILY DISABLED FOR INVESTIGATION
+    const allocator = std.testing.allocator;
+    var db_dir = std.testing.tmpDir(.{});
+    defer db_dir.cleanup();
+    const db_path = try db_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(db_path);
+
+    var backup_dir = std.testing.tmpDir(.{});
+    defer backup_dir.cleanup();
+    const backup_path = try backup_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(backup_path);
+
+    var restore_dir = std.testing.tmpDir(.{});
+    defer restore_dir.cleanup();
+    const restore_base = try restore_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(restore_base);
+    const restore_path = try std.fs.path.join(allocator, &.{ restore_base, "restored_db" });
+    defer allocator.free(restore_path);
+
+    var err_str: ?Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    // Create database and backup
+    {
+        var db, const families = try DB.open(
+            allocator,
+            db_path,
+            .{
+                .create_if_missing = true,
+                .block_cache = .{ .size_bytes = 0 }, // Disable cache
+            },
+            null,
+            false,
+            &err_str,
+        );
+        defer db.deinit();
+        defer DB.freeColumnFamilies(allocator, families);
+
+        const cf = families[0].handle;
+        db = db.withDefaultColumnFamily(cf);
+
+        try db.put(null, "test_key", "test_value", .{}, &err_str);
+
+        var backup_engine = try BackupEngine.open(allocator, backup_path, &err_str);
+        defer backup_engine.close();
+
+        try backup_engine.createNewBackup(&db, true, &err_str);
+    }
+
+    // Restore with keep_log_files option
+    {
+        var backup_engine = try BackupEngine.open(allocator, backup_path, &err_str);
+        defer backup_engine.close();
+
+        try backup_engine.restoreFromLatestBackup(restore_path, restore_path, .{ .keep_log_files = true }, &err_str);
+    }
+
+    // Verify restored data is accessible
+    {
+        var db, const families = try DB.open(
+            allocator,
+            restore_path,
+            .{
+                .create_if_missing = false,
+                .block_cache = .{ .size_bytes = 0 }, // Disable cache
+            },
+            null,
+            false,
+            &err_str,
+        );
+        defer db.deinit();
+        defer DB.freeColumnFamilies(allocator, families);
+
+        const cf = families[0].handle;
+        db = db.withDefaultColumnFamily(cf);
+
+        const val = try db.get(null, "test_key", .{}, &err_str);
+        defer if (val) |v| v.deinit();
+        try std.testing.expect(val != null);
+        try std.testing.expectEqualSlices(u8, "test_value", val.?.data);
+    }
+}

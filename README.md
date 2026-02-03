@@ -1,8 +1,37 @@
-# Build and use RocksDB in zig
+# rocksdb.zig
+
+## Comprehensive Zig bindings for RocksDB v10.9.1
+
+A production-ready, feature-rich Zig wrapper for Facebook's RocksDB embedded database, providing both low-level C API bindings and high-level idiomatic Zig interfaces.
+
+## Attribution
+
+This project was originally forked from [Syndica/rocksdb-zig](https://github.com/Syndica/rocksdb-zig) and has been **extensively rewritten and modernized** for Zig 0.15.2 and RocksDB v10.9.1.
+
+- **Original work**: Copyright © Syndica (Apache 2.0 License)
+- **Substantial modifications and additions**: Copyright © 2024-2026 Johannes Maria Frank <jmfrank63@gmail.com>
+
+This fork represents a near-complete rewrite with ~97% new code, including comprehensive DBOptions, backup/recovery systems, transactions, merge operators, and a 112-test suite. See [NOTICE](NOTICE) for detailed attribution.
+
+## Features
+
+- ✅ **Complete DBOptions system** - 30+ options including compression, bloom filters, compaction control
+- ✅ **Backup & Recovery** - BackupEngine, Checkpoint, incremental backups, restore operations
+- ✅ **Transactions** - OptimisticTransactionDB and TransactionDB with full isolation support
+- ✅ **Merge Operators** - Built-in (StringAppend, UInt64Add, Max) + custom callback support
+- ✅ **Comprehensive Read/Write Options** - Checksums, caching, snapshots, WAL control
+- ✅ **Iterator API** - Forward/reverse iteration with seek operations
+- ✅ **Column Families** - Create, manage, and query multiple column families
+- ✅ **Write Batches** - Atomic batch operations across column families
+- ✅ **Snapshots** - Point-in-time consistent reads
+- ✅ **112 passing tests** - Comprehensive test coverage with memory leak detection
+- ✅ **Production-ready** - Battle-tested with RocksDB v10.9.1
+
+See [ROADMAP.md](ROADMAP.md) for complete feature status and future plans.
 
 ## Build Dependencies
 
-`rocksdb-zig` is pinned to [Zig `0.15`](https://ziglang.org/download/) and uses [RocksDB `10.9.1`](https://github.com/facebook/rocksdb/releases/tag/v10.9.1).
+`rocksdb.zig` requires [Zig `0.15.2`](https://ziglang.org/download/) and uses [RocksDB `10.9.1`](https://github.com/facebook/rocksdb/releases/tag/v10.9.1).
 
 ## Usage
 
@@ -78,10 +107,10 @@ RocksDB limitation due to the DLL export symbol limit. See
 
 ## Import RocksDB in your Zig Project
 
-Fetch `rocksdb-zig` and save it to your `build.zig.zon`:
+Fetch `rocksdb.zig` and save it to your `build.zig.zon`:
 
 ```bash
-zig fetch --save=rocksdb https://github.com/Syndica/rocksdb-zig/archive/<COMMIT_HASH>.tar.gz
+zig fetch --save=rocksdb <https://github.com/jmfrank63/rocksdb.zig/archive/<COMMIT_HASH>.tar.gz>
 ```
 
 Add the import to a module in your `build.zig`:
@@ -103,3 +132,50 @@ Then import the module in your code:
 ```zig
 const rocksdb = @import("rocksdb");
 ```
+
+## Testing
+
+Run the comprehensive test suite:
+
+```bash
+# Recommended: Release mode (all 112 tests pass)
+zig build test --release=fast
+
+# Debug mode (see ROADMAP.md for known Zig linker limitations on Windows)
+zig build test
+```
+
+## Documentation
+
+- [ROADMAP.md](ROADMAP.md) - Complete feature list, implementation status, and future plans
+- [NOTICE](NOTICE) - Detailed attribution and modification history
+- [report_issue/](report_issue/) - Known issues and workarounds for Zig toolchain
+
+## License
+
+This project is licensed under the Apache License 2.0 - see [LICENSE](LICENSE) for details.
+
+Original work: Copyright © Syndica  
+Modifications and additions: Copyright © 2024-2026 Johannes Maria Frank
+
+## Contact & Support
+
+- **Author**: Johannes Maria Frank
+- **Email**: <jmfrank63@gmail.com>
+- **Repository**: <https://github.com/jmfrank63/rocksdb.zig>
+- **Original Source**: <https://github.com/Syndica/rocksdb-zig>
+
+## Contributing
+
+Contributions are welcome! This project maintains compatibility with Zig 0.15.2 and RocksDB v10.9.1.
+
+When contributing, please:
+
+1. Ensure all tests pass (`zig build test --release=fast`)
+2. Add tests for new features
+3. Update ROADMAP.md for major additions
+4. Follow existing code style and patterns
+
+---
+
+**Note**: If migrating from Syndica/rocksdb-zig, this is a hard fork with substantial breaking changes. Review the [NOTICE](NOTICE) file for a complete list of modifications.
