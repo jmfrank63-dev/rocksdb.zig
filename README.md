@@ -24,7 +24,7 @@ This fork represents a near-complete rewrite with ~97% new code, including compr
 - ✅ **Column Families** - Create, manage, and query multiple column families
 - ✅ **Write Batches** - Atomic batch operations across column families
 - ✅ **Snapshots** - Point-in-time consistent reads
-- ✅ **112 passing tests** - Comprehensive test coverage with memory leak detection
+- ✅ **114 passing tests** - Comprehensive test coverage with memory leak detection
 - ✅ **Production-ready** - Battle-tested with RocksDB v10.9.1
 
 See [ROADMAP.md](ROADMAP.md) for complete feature status and future plans.
@@ -138,8 +138,8 @@ const rocksdb = @import("rocksdb");
 Run the comprehensive test suite:
 
 ```bash
-# Recommended: Release mode (all 112 tests pass)
-zig build test --release=fast
+# Recommended: Release mode (all 114 tests pass)
+zig build test -Doptimize=ReleaseFast
 
 # Debug mode (see ROADMAP.md for known Zig linker limitations on Windows)
 zig build test
@@ -171,7 +171,7 @@ Contributions are welcome! This project maintains compatibility with Zig 0.15.2 
 
 When contributing, please:
 
-1. Ensure all tests pass (`zig build test --release=fast`)
+1. Ensure all tests pass (`zig build test -Doptimize=ReleaseFast`)
 2. Add tests for new features
 3. Update ROADMAP.md for major additions
 4. Follow existing code style and patterns
