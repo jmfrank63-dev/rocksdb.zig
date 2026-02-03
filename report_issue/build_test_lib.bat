@@ -82,6 +82,10 @@ if %ERRORLEVEL% EQU 0 (
     echo.
     echo Now try: zig build test -Dtarget=native-windows-msvc
     echo This WILL FAIL with duplicate symbol errors from lld-link
+    
+    REM Cleanup intermediate PDB artifacts
+    del vc140.pdb 2>nul
+    
     popd
     exit /b 0
 ) else (

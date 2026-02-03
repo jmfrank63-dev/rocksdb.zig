@@ -130,6 +130,6 @@ if %ERRORLEVEL% EQU 0 (
 )
 
 REM Cleanup
-del msvc_test.c msvc_test.obj msvc_test.pdb 2>nul
+del msvc_test.c msvc_test.obj msvc_test.exe msvc_test.ilk msvc_test.pdb vc140.pdb 2>nul
 
 popd
