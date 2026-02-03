@@ -1,27 +1,54 @@
 @echo off
+REM Change to script's directory
+pushd "%~dp0"
+
 echo ========================================
 echo WORKAROUND: Building with MSVC linker
 echo ========================================
 echo.
 
-REM Detect Visual Studio installation
+REM Detect Visual Studio installation (try 2022, then 2019, then Build Tools)
+set "VSCMD_PATH="
+
 if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" (
     set "VSCMD_PATH=C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat"
-) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\Tools\VsDevCmd.bat" (
-    set "VSCMD_PATH=C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\Tools\VsDevCmd.bat"
-) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat" (
-    set "VSCMD_PATH=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat"
-) else if exist "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\Common7\Tools\VsDevCmd.bat" (
-    set "VSCMD_PATH=C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\Common7\Tools\VsDevCmd.bat"
-) else if exist "C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\Common7\Tools\VsDevCmd.bat" (
-    set "VSCMD_PATH=C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\Common7\Tools\VsDevCmd.bat"
-) else if exist "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\Common7\Tools\VsDevCmd.bat" (
-    set "VSCMD_PATH=C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\Common7\Tools\VsDevCmd.bat"
-) else (
-    echo ✗ Error: Visual Studio not found!
-    echo Please install Visual Studio 2019 or 2022 with C++ tools.
-    exit /b 1
+    goto :found_vs
 )
+if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\Tools\VsDevCmd.bat" (
+    set "VSCMD_PATH=C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\Tools\VsDevCmd.bat"
+    goto :found_vs
+)
+if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat" (
+    set "VSCMD_PATH=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat"
+    goto :found_vs
+)
+if exist "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" (
+    set "VSCMD_PATH=C:\Program Files\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat"
+    goto :found_vs
+)
+if exist "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\Common7\Tools\VsDevCmd.bat" (
+    set "VSCMD_PATH=C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\Common7\Tools\VsDevCmd.bat"
+    goto :found_vs
+)
+if exist "C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\Common7\Tools\VsDevCmd.bat" (
+    set "VSCMD_PATH=C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\Common7\Tools\VsDevCmd.bat"
+    goto :found_vs
+)
+if exist "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\Common7\Tools\VsDevCmd.bat" (
+    set "VSCMD_PATH=C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\Common7\Tools\VsDevCmd.bat"
+    goto :found_vs
+)
+if exist "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\Common7\Tools\VsDevCmd.bat" (
+    set "VSCMD_PATH=C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\Common7\Tools\VsDevCmd.bat"
+    goto :found_vs
+)
+
+echo ✗ Error: Visual Studio not found!
+echo Please install Visual Studio 2019/2022 (any edition) or Build Tools with C++ support.
+popd
+exit /b 1
+
+:found_vs
 
 echo Initializing MSVC environment...
 set "VSCMD_ARG_no_logo=1"
@@ -29,8 +56,11 @@ call "%VSCMD_PATH%" -arch=x64 -host_arch=x64 >nul 2>&1
 
 if not exist test_lib.lib (
     echo Building test_lib.lib first...
-    call build_test_lib.bat
-    if %ERRORLEVEL% NEQ 0 exit /b 1
+    call "%~dp0build_test_lib.bat"
+    if %ERRORLEVEL% NEQ 0 (
+        popd
+        exit /b 1
+    )
 )
 
 echo.
@@ -56,6 +86,7 @@ cl.exe /nologo /MDd /Zi /Od msvc_test.c /link test_lib.lib /OUT:msvc_test.exe
 
 if %ERRORLEVEL% NEQ 0 (
     echo ✗ Compilation failed!
+    popd
     exit /b 1
 )
 
@@ -76,8 +107,11 @@ if %ERRORLEVEL% EQU 0 (
     echo which FAILS with duplicate symbol errors from lld-link.
 ) else (
     echo ✗ Test execution failed!
+    popd
     exit /b 1
 )
 
 REM Cleanup
 del msvc_test.c msvc_test.obj msvc_test.pdb 2>nul
+
+popd

@@ -50,7 +50,7 @@ Share the `WORKAROUND.md` file which explains:
 
 | Configuration                       | Result                   |
 | ----------------------------------- | ------------------------ |
-| Zig Release + Zig-built RocksDB    | ✅ 114/114 tests pass    |
+| Zig Release + Zig-built RocksDB     | ✅ 114/114 tests pass    |
 | Zig Release + MSVC Release RocksDB  | ✅ All tests pass        |
 | **MSVC Debug + MSVC linker**        | **✅ All tests pass**    |
 | Zig Debug + Zig lld-link            | ❌ Duplicate symbols     |

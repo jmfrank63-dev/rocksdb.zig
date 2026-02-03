@@ -11,7 +11,7 @@ This project was originally forked from [Syndica/rocksdb-zig](https://github.com
 - **Original work**: Copyright © Syndica (Apache 2.0 License)
 - **Substantial modifications and additions**: Copyright © 2024-2026 Johannes Maria Frank <jmfrank63@gmail.com>
 
-This fork represents a near-complete rewrite with ~97% new code, including comprehensive DBOptions, backup/recovery systems, transactions, merge operators, and a 112-test suite. See [NOTICE](NOTICE) for detailed attribution.
+This fork represents a near-complete rewrite with ~97% new code, including comprehensive DBOptions, backup/recovery systems, transactions, merge operators, and a 114-test suite. See [NOTICE](NOTICE) for detailed attribution.
 
 ## Features
 
@@ -86,12 +86,12 @@ On Windows, only the C API can be exported to a DLL due to symbol export limits.
 
 #### ReleaseFast builds
 
-Add `--release=fast` to any build command for optimized release builds:
+Add `-Doptimize=ReleaseFast` to any build command for optimized release builds:
 
 ```bash
-zig build --release=fast
-zig build --release=fast -Denable_c_api_static=true
-zig build --release=fast -Denable_c_api_shared=true
+zig build -Doptimize=ReleaseFast
+zig build -Doptimize=ReleaseFast -Denable_c_api_static=true
+zig build -Doptimize=ReleaseFast -Denable_c_api_shared=true
 ```
 
 #### Additional options

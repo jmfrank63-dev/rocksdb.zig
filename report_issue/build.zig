@@ -27,8 +27,8 @@ pub fn build(b: *std.Build) void {
     // Try to add debug CRT libraries
     // This causes duplicate symbols because Zig already linked release CRT
     if (target.result.os.tag == .windows and target.result.abi == .msvc) {
-        // Try common Windows SDK paths
-        // Note: This path may vary - adjust for your Windows SDK version
+        // Add common Windows SDK paths (linker will use first one that exists)
+        // Note: Adjust these paths if you have a different Windows SDK version
         const sdk_paths = [_][]const u8{
             "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/ucrt/x64",
             "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.22621.0/ucrt/x64",
@@ -36,10 +36,9 @@ pub fn build(b: *std.Build) void {
             "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.19041.0/ucrt/x64",
         };
 
-        // Try to add first available SDK path
+        // Add all SDK paths; linker will use the first one that exists
         for (sdk_paths) |sdk_path| {
             tests.addLibraryPath(.{ .cwd_relative = sdk_path });
-            break; // Only need one path
         }
 
         // Link our test library (built with MSVC Debug /MDd)
