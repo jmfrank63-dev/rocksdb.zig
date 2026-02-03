@@ -129,7 +129,7 @@ if %ERRORLEVEL% EQU 0 (
     exit /b 1
 )
 
-REM Cleanup
+REM Cleanup (including vc140.pdb from test_lib.lib build)
 del msvc_test.c msvc_test.obj msvc_test.exe msvc_test.ilk msvc_test.pdb vc140.pdb 2>nul
 
 popd
