@@ -1,12 +1,30 @@
 @echo off
+setlocal enabledelayedexpansion
 REM Change to script's directory to ensure we can find test_lib.c
 pushd "%~dp0"
 
 echo Building test_lib.c with MSVC Debug CRT (/MDd)...
 
-REM Detect Visual Studio installation (try 2022, then 2019, then Build Tools)
+REM Detect Visual Studio installation using vswhere.exe (official VS discovery tool)
+REM This handles Preview, Insiders, custom installs, and future VS versions
 set "VSCMD_PATH="
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 
+if exist "%VSWHERE%" (
+    for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
+        set "VS_INSTALL_PATH=%%i"
+    )
+    
+    if defined VS_INSTALL_PATH (
+        set "VSCMD_PATH=!VS_INSTALL_PATH!\Common7\Tools\VsDevCmd.bat"
+        if exist "!VSCMD_PATH!" goto :found_vs
+    )
+    echo vswhere.exe found no VS installation with C++ tools, trying fallback paths...
+) else (
+    echo vswhere.exe not found, trying fallback paths...
+)
+
+REM Fallback: Manual path detection (for compatibility)
 if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" (
     set "VSCMD_PATH=C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat"
     goto :found_vs
