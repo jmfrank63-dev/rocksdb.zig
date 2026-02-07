@@ -21,8 +21,12 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{matrix.os}}
+        include:
+          - os: ubuntu-latest
+            runs-on: ubuntu-latest
+          - os: windows-latest
+            runs-on: [self-hosted, ghr-base-win]
+    runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 60
     steps:
       - name: checkout
@@ -44,11 +48,11 @@ jobs:
           zig build --release=fast -Denable_c_api_static=true
 
       - name: test C-API-only shared (Windows)
-        if: runner.os == 'Windows'
+        if: matrix.os == 'windows-latest'
         run: |
           zig build --release=fast -Denable_c_api_shared=true
 
       - name: test with snappy (Linux)
-        if: runner.os == 'Linux'
+        if: matrix.os == 'ubuntu-latest'
         run: |
           zig build --release=fast -Denable_snappy=true test
