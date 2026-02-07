@@ -27,7 +27,7 @@ This fork represents a near-complete rewrite (~97% new code) with comprehensive 
 - Enhanced Iterator API with forward/reverse iteration and seek operations
 
 **Quality & Testing**
-- 114 comprehensive tests covering all features
+- 116 comprehensive tests covering all features
 - Memory leak detection and error propagation verification
 - Cross-platform testing (Windows MSVC, Linux, macOS)
 - Production-ready with RocksDB v10.9.1
@@ -55,7 +55,7 @@ This project links against:
 - ✅ **Column Families** - Create, manage, and query multiple column families
 - ✅ **Write Batches** - Atomic batch operations across column families
 - ✅ **Snapshots** - Point-in-time consistent reads
-- ✅ **114 passing tests** - Comprehensive test coverage with memory leak detection
+- ✅ **116 passing tests** - Comprehensive test coverage with memory leak detection
 - ✅ **Production-ready** - Battle-tested with RocksDB v10.9.1
 
 See [ROADMAP.md](ROADMAP.md) for complete feature status and future plans.
@@ -104,27 +104,22 @@ The script automatically:
 
 #### Windows MSVC Build Variants
 
-All Windows MSVC builds use the pre-built Release RocksDB library:
+**Note:** When targeting native-windows-msvc, all builds use the pre-built Release RocksDB static library (`rocksdb.lib`). Build variant flags (`-Denable_c_api_static`, `-Denable_c_api_shared`, `-Denable_snappy`) only apply when building RocksDB from source with Zig's clang, not with the pre-built MSVC library.
+
+For MSVC builds, the main variants are:
 
 ```powershell
-# Default: Build with full C++ API
+# Default: Build Zig code with pre-built RocksDB library
 zig build -Dtarget=native-windows-msvc
 
-# C-API-only static library
-zig build -Dtarget=native-windows-msvc -Denable_c_api_static
-
-# C-API-only DLL (avoids 65535 symbol export limit)
-zig build -Dtarget=native-windows-msvc -Denable_c_api_shared
-
-# Release mode (recommended for testing)
+# Release mode (recommended for testing - all 116 tests pass)
 zig build test -Dtarget=native-windows-msvc --release=fast
 
-# Debug mode (115 of 116 tests pass; see ROADMAP.md for details)
+# Debug mode (115 of 116 tests pass; 1 skipped due to CRT limitations)
 zig build test -Dtarget=native-windows-msvc
-
-# With Snappy compression
-zig build -Dtarget=native-windows-msvc -Denable_snappy
 ```
+
+To use different RocksDB variants (C-API-only, DLL, or with Snappy) on Windows, build from source without `-Dtarget=native-windows-msvc` using Zig's clang compiler.
 
 ### Non-Windows Build
 
@@ -220,7 +215,7 @@ const rocksdb = @import("rocksdb");
 Run the comprehensive test suite:
 
 ```bash
-# Recommended: Release mode (all 114 tests pass)
+# Recommended: Release mode (all 116 tests pass)
 zig build test -Doptimize=ReleaseFast
 
 # Debug mode (see ROADMAP.md for known Zig linker limitations on Windows)

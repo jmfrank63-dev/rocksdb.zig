@@ -14,11 +14,17 @@ if(USE_NATIVE_ROCKSDB)
     message(STATUS "Using native MSVC-built RocksDB")
     
     if(NOT DEFINED ROCKSDB_BUILD_DIR)
-        set(ROCKSDB_BUILD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build_rocksdb")
+        set(ROCKSDB_BUILD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../build/rocksdb_native")
     endif()
     
     set(ROCKSDB_INCLUDE_DIR "$ENV{USERPROFILE}/AppData/Local/zig/p/N-V-__8AAEv0kgK0ypKHX8K7uy2ja2yMJb-o6B8pmW-B0ur5/include")
-    set(ROCKSDB_LIB "${ROCKSDB_BUILD_DIR}/Release/rocksdb.lib")
+    
+    # Check for library in Ninja output location (direct in build dir)
+    set(ROCKSDB_LIB "${ROCKSDB_BUILD_DIR}/rocksdb.lib")
+    if(NOT EXISTS "${ROCKSDB_LIB}")
+        # Fall back to old MSBuild location
+        set(ROCKSDB_LIB "${ROCKSDB_BUILD_DIR}/Release/rocksdb.lib")
+    endif()
     
     if(NOT EXISTS "${ROCKSDB_LIB}")
         message(FATAL_ERROR "RocksDB library not found at ${ROCKSDB_LIB}. Please run build_rocksdb_native.ps1 first.")

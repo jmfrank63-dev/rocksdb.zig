@@ -43,13 +43,16 @@ Build with MSVC compiler instead of clang (requires additional configuration in 
 
 ## Current Workaround
 
-The test `BackupEngine.restoreFromLatestBackup` is **skipped** to keep the CI green:
+The test `BackupEngine.restoreFromLatestBackup` is **skipped in Debug mode only** due to CRT mismatch:
 
 ```zig
-if (true) return error.SkipZigTest;
+// Skip in Debug mode only - Release mode works fine
+if (@import("builtin").mode == .Debug) return error.SkipZigTest;
 ```
 
-To run this test, use Release mode: `zig build test --release=fast`
+This allows Release builds to pass all 116 tests while Debug builds pass 115/116 with 1 skipped.
+
+To run all tests including this one, use Release mode: `zig build test --release=fast`
 
 ## Future Work
 

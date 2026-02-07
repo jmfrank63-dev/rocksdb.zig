@@ -29,39 +29,59 @@ When building with `-Dtarget=native-windows-msvc`, you need to build RocksDB wit
 
 ### Quick Start
 
-Use the provided PowerShell script:
+Use the provided PowerShell script from the project root:
 
 ```powershell
-cd vendor
-.\build_rocksdb.ps1 -BuildType Debug    # For debug builds
-.\build_rocksdb.ps1 -BuildType Release  # For release builds
+# From rocksdb-zig root directory
+.\scripts\build_rocksdb.ps1 Release  # Recommended for production
+.\scripts\build_rocksdb.ps1 Debug    # For debug (note: Zig tests use Release lib in both modes)
 ```
 
 This will:
-1. Configure RocksDB with CMake using Visual Studio 2022
-2. Build the static library
-3. Place it in `vendor/build_rocksdb_Debug/Debug/rocksdb.lib` or `vendor/build_rocksdb_Release/Release/rocksdb.lib`
+1. Configure RocksDB with CMake using Ninja generator
+2. Build the static library with optimal parallel compilation
+3. Place it in `build\rocksdb_Release\rocksdb.lib` or `build\rocksdb_Debug\rocksdb.lib`
 
-### Manual Build
+### What the Script Does
 
-If you prefer to build manually:
+- Automatically detects Visual Studio installation
+- Sets up MSVC environment for Ninja
+- Builds with static CRT (`/MT`) to avoid linker warnings
+- Enables RTTI for RocksDB compatibility
+- Uses all CPU cores for parallel compilation
 
-```bash
-cd vendor
-cmake -S rocksdb -B build_rocksdb_Debug -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Debug -DROCKSDB_BUILD_SHARED=OFF -DWITH_TESTS=OFF -DWITH_TOOLS=OFF
-cd build_rocksdb_Debug
-cmake --build . --config Debug
+### Manual Build (Advanced)
+
+If you prefer to build manually with Ninja:
+
+```powershell
+# From rocksdb-zig root
+mkdir build\rocksdb_Release
+cd build\rocksdb_Release
+
+# Setup MSVC environment (PowerShell)
+$vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+Import-Module "$vsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation
+
+# Configure with Ninja
+cmake ..\..\vendor\rocksdb -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DWITH_MD_LIBRARY=OFF -DUSE_RTTI=ON -DROCKSDB_BUILD_SHARED=OFF -DWITH_TESTS=OFF -DWITH_TOOLS=OFF -DFAIL_ON_WARNINGS=OFF
+
+# Build
+cmake --build . --parallel
 ```
 
 ### After Building
 
 Once the library is built, the Zig build system will automatically detect and link against it:
 
-```bash
-cd ../..  # Back to rocksdb-zig root
+```powershell
+# Back to rocksdb-zig root
 zig build -Dtarget=native-windows-msvc
-zig build test -Dtarget=native-windows-msvc
+zig build test -Dtarget=native-windows-msvc --release=fast
 ```
+
+**Note:** Zig builds always use the Release RocksDB library to avoid CRT debug symbol conflicts, regardless of whether you build Zig code in Debug or Release mode.
 
 ## Default Build
 

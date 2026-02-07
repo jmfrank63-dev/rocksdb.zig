@@ -161,11 +161,11 @@ fn addRocksDB(
     // Note: MSVC ABI builds may fail if MSVC headers are not available.
     // In that case, use -Duse_msvc_lib=true or the default target.
 
-    // Now print the compiler being used
-    if (use_msvc_compiler) {
-        std.debug.print("Building with MSVC compiler\n", .{});
-    } else if (use_msvc_lib) {
+   // Print compiler info (applies only to Zig code compilation, not RocksDB)
+    if (use_msvc_lib) {
         std.debug.print("Building with Zig clang compiler + pre-built MSVC RocksDB library\n", .{});
+    } else if (use_msvc_compiler) {
+        std.debug.print("Building with MSVC compiler (Zig code only; RocksDB built from source)\n", .{});
     } else {
         std.debug.print("Building with Zig clang compiler (default)\n", .{});
     }
