@@ -15,7 +15,10 @@ if ($LASTEXITCODE -eq 0) {
 Write-Host ""
 Write-Host "2. Testing MSVC ABI build..." -ForegroundColor Yellow
 $output2 = zig build -Dtarget=native-windows-msvc 2>&1
-Write-Host $output2[0..5] -join "`n"
+if ($output2.Count -gt 0) {
+    $lines = @($output2) | Select-Object -First 6
+    Write-Host ($lines -join "`n")
+}
 if ($LASTEXITCODE -eq 0) {
     Write-Host "   [OK] MSVC ABI build: PASSED" -ForegroundColor Green
 } else {
@@ -25,7 +28,10 @@ if ($LASTEXITCODE -eq 0) {
 Write-Host ""
 Write-Host "3. Testing MSVC ABI test (should skip)..." -ForegroundColor Yellow
 $output3 = zig build test -Dtarget=native-windows-msvc 2>&1
-Write-Host $output3[0..5] -join "`n"
+if ($output3.Count -gt 0) {
+    $lines = @($output3) | Select-Object -First 6
+    Write-Host ($lines -join "`n")
+}
 if ($LASTEXITCODE -eq 0) {
     Write-Host "   [OK] MSVC ABI test: PASSED (tests skipped)" -ForegroundColor Green
 } else {

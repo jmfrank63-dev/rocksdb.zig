@@ -16,6 +16,9 @@ if ($debugOutput -match "(\d+)/(\d+) tests passed; (\d+) skipped") {
         Write-Host "   [ERROR] WRONG - Expected 1 skipped, got $skipped" -ForegroundColor Red
         exit 1
     }
+} else {
+    Write-Host "   [ERROR] Could not parse debug output: $debugOutput" -ForegroundColor Red
+    exit 1
 }
 
 Write-Host "`n2. Release build (should skip 0 tests)..." -ForegroundColor Yellow  
