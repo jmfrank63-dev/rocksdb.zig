@@ -19,14 +19,7 @@ jobs:
           zig fmt --check src/ build.zig
 
   test:
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            runs-on: ubuntu-latest
-          - os: windows-latest
-            runs-on: [self-hosted, ghr-base-win]
-    runs-on: ${{ matrix.runs-on }}
+    runs-on: [self-hosted, ghr-base-win]
     timeout-minutes: 60
     steps:
       - name: checkout
@@ -39,7 +32,7 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: test
+      - name: test (default - full C++ API)
         run: |
           zig build --release=fast test
 
@@ -48,11 +41,13 @@ jobs:
           zig build --release=fast -Denable_c_api_static=true
 
       - name: test C-API-only shared (Windows)
-        if: matrix.os == 'windows-latest'
         run: |
           zig build --release=fast -Denable_c_api_shared=true
 
-      - name: test with snappy (Linux)
-        if: matrix.os == 'ubuntu-latest'
+      - name: test with Snappy (Windows)
         run: |
           zig build --release=fast -Denable_snappy=true test
+
+      - name: test with MSVC compiler
+        run: |
+          zig build --release=fast -Dtarget=native-windows-msvc -Duse_msvc_compiler=true test
