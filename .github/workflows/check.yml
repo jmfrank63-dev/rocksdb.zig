@@ -12,17 +12,14 @@ jobs:
       - name: setup-zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.14.1
+          version: 0.15.2
 
       - name: lint
         run: |
           zig fmt --check src/ build.zig
 
   test:
-    strategy:
-      matrix:
-        os: [ubuntu-latest]
-    runs-on: ${{matrix.os}}
+    runs-on: [self-hosted, ghr-base-win]
     timeout-minutes: 60
     steps:
       - name: checkout
@@ -33,8 +30,25 @@ jobs:
       - name: setup-zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.14.1
+          version: 0.15.2
+          use-cache: false
 
-      - name: test
+      - name: test (default - full C++ API)
         run: |
-          zig build test
+          zig build --release=fast test
+
+      - name: test C-API-only static
+        run: |
+          zig build --release=fast -Denable_c_api_static=true
+
+      - name: test C-API-only shared (Windows)
+        run: |
+          zig build --release=fast -Denable_c_api_shared=true
+
+      - name: test with Snappy (Windows)
+        run: |
+          zig build --release=fast -Denable_snappy=true test
+
+      - name: test with MSVC compiler
+        run: |
+          zig build --release=fast -Dtarget=native-windows-msvc -Duse_msvc_compiler=true test

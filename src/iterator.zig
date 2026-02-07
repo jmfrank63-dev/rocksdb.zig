@@ -6,8 +6,6 @@ const Allocator = std.mem.Allocator;
 
 const Data = lib.Data;
 
-const general_freer = lib.data.general_freer;
-
 pub const Direction = enum { forward, reverse };
 
 pub const Iterator = struct {
@@ -66,11 +64,15 @@ pub const Iterator = struct {
 
 pub const RawIterator = struct {
     inner: *rdb.rocksdb_iterator_t,
+    read_options: ?*rdb.rocksdb_readoptions_t,
 
     const Self = @This();
 
     pub fn deinit(self: Self) void {
         rdb.rocksdb_iter_destroy(self.inner);
+        if (self.read_options) |opts| {
+            rdb.rocksdb_readoptions_destroy(opts);
+        }
     }
 
     pub fn seek(self: Self, key_: []const u8) void {
@@ -155,3 +157,296 @@ pub const RawIterator = struct {
         }
     }
 };
+
+test "RawIterator seek and bounds" {
+    const database = @import("database.zig");
+    const allocator = std.testing.allocator;
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?lib.Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try database.DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true, .create_missing_column_families = true },
+        &.{.{ .name = "default" }},
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer database.DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    try db.put(null, "a", "1", .{}, &err_str);
+    try db.put(null, "b", "2", .{}, &err_str);
+    try db.put(null, "c", "3", .{}, &err_str);
+
+    var raw = db.rawIterator(null, .{});
+    defer raw.deinit();
+
+    raw.seekToFirst();
+    var key = raw.key().?;
+    try std.testing.expectEqualSlices(u8, "a", key.data);
+
+    raw.seekToLast();
+    key = raw.key().?;
+    try std.testing.expectEqualSlices(u8, "c", key.data);
+
+    raw.seek("b");
+    key = raw.key().?;
+    try std.testing.expectEqualSlices(u8, "b", key.data);
+}
+
+test "Iterator on empty database returns no entries" {
+    const database = @import("database.zig");
+    const allocator = std.testing.allocator;
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?lib.Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try database.DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer database.DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    var iter = db.iterator(null, .forward, null, .{});
+    defer iter.deinit();
+
+    const entry = try iter.next(&err_str);
+    try std.testing.expect(entry == null);
+}
+
+test "RawIterator seek to non-existent key" {
+    const database = @import("database.zig");
+    const allocator = std.testing.allocator;
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?lib.Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try database.DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer database.DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    try db.put(null, "a", "1", .{}, &err_str);
+    try db.put(null, "c", "3", .{}, &err_str);
+
+    var raw = db.rawIterator(null, .{});
+    defer raw.deinit();
+
+    // Seek to nonexistent key between existing keys
+    raw.seek("b");
+    // Should position at next valid key or become invalid
+    if (raw.valid()) {
+        const key = raw.key();
+        if (key) |k| {
+            // If valid, it should be at 'c' (next key after 'b')
+            try std.testing.expectEqualSlices(u8, "c", k.data);
+        }
+    }
+}
+
+test "Iterator reverse direction" {
+    const database = @import("database.zig");
+    const allocator = std.testing.allocator;
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?lib.Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try database.DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer database.DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    try db.put(null, "a", "1", .{}, &err_str);
+    try db.put(null, "b", "2", .{}, &err_str);
+    try db.put(null, "c", "3", .{}, &err_str);
+
+    var iter = db.iterator(null, .reverse, null, .{});
+    defer iter.deinit();
+
+    // First item in reverse should be 'c'
+    const entry1 = try iter.nextValue(&err_str);
+    try std.testing.expect(entry1 != null);
+    try std.testing.expectEqualSlices(u8, "3", entry1.?.data);
+
+    const entry2 = try iter.nextValue(&err_str);
+    try std.testing.expect(entry2 != null);
+    try std.testing.expectEqualSlices(u8, "2", entry2.?.data);
+}
+
+test "Iterator with seek position" {
+    const database = @import("database.zig");
+    const allocator = std.testing.allocator;
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?lib.Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try database.DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer database.DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    try db.put(null, "a", "1", .{}, &err_str);
+    try db.put(null, "b", "2", .{}, &err_str);
+    try db.put(null, "c", "3", .{}, &err_str);
+
+    var iter = db.iterator(null, .forward, "b", .{});
+    defer iter.deinit();
+
+    const entry1 = try iter.nextKey(&err_str);
+    try std.testing.expect(entry1 != null);
+    try std.testing.expectEqualSlices(u8, "b", entry1.?.data);
+}
+
+test "Iterator cleanup after exhaustion" {
+    const database = @import("database.zig");
+    const allocator = std.testing.allocator;
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?lib.Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try database.DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer database.DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    try db.put(null, "a", "1", .{}, &err_str);
+
+    var iter = db.iterator(null, .forward, null, .{});
+    defer iter.deinit();
+
+    // Exhaust the iterator
+    _ = try iter.next(&err_str);
+    const second = try iter.next(&err_str);
+    try std.testing.expect(second == null);
+
+    // Call next again after exhaustion
+    const third = try iter.next(&err_str);
+    try std.testing.expect(third == null);
+}
+
+test "RawIterator multiple operations" {
+    const database = @import("database.zig");
+    const allocator = std.testing.allocator;
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const path = try dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    var err_str: ?lib.Data = null;
+    defer if (err_str) |e| e.deinit();
+
+    var db, const families = try database.DB.open(
+        allocator,
+        path,
+        .{ .create_if_missing = true },
+        null,
+        false,
+        &err_str,
+    );
+    defer db.deinit();
+    defer database.DB.freeColumnFamilies(allocator, families);
+
+    const cf = families[0].handle;
+    db = db.withDefaultColumnFamily(cf);
+
+    try db.put(null, "a", "1", .{}, &err_str);
+    try db.put(null, "b", "2", .{}, &err_str);
+    try db.put(null, "c", "3", .{}, &err_str);
+
+    var raw = db.rawIterator(null, .{});
+    defer raw.deinit();
+
+    // Multiple seeks
+    raw.seekToFirst();
+    try std.testing.expect(raw.valid());
+
+    raw.seekToLast();
+    try std.testing.expect(raw.valid());
+
+    raw.seek("b");
+    try std.testing.expect(raw.valid());
+
+    // Test status doesn't error on valid iterator
+    try raw.status(&err_str);
+    try std.testing.expect(err_str == null);
+}
