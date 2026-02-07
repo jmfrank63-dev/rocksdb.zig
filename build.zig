@@ -19,15 +19,16 @@ pub fn build(b: *Build) !void {
         "Use pre-built MSVC library from vendor/ (requires -Dtarget=native-windows-msvc)",
     ) orelse false;
 
-    // When targeting MSVC ABI, use pre-built MSVC library by default
-    // because Zig's clang has conflicts between libc++ and MSVC STL headers
-    const effective_use_msvc_lib = use_msvc_lib or target.result.abi == .msvc;
-
     const use_msvc_compiler = b.option(
         bool,
         "use_msvc_compiler",
         "Use MSVC compiler instead of clang (Windows MSVC ABI only). Default: false (uses clang)",
     ) orelse false;
+
+    // When targeting MSVC ABI, use pre-built MSVC library by default
+    // because Zig's clang has conflicts between libc++ and MSVC STL headers.
+    // However, if the user explicitly asks for the MSVC compiler, we build from source.
+    const effective_use_msvc_lib = use_msvc_lib or (target.result.abi == .msvc and !use_msvc_compiler);
 
     const enable_c_api_static = b.option(
         bool,
@@ -161,7 +162,7 @@ fn addRocksDB(
     // Note: MSVC ABI builds may fail if MSVC headers are not available.
     // In that case, use -Duse_msvc_lib=true or the default target.
 
-   // Print compiler info (applies only to Zig code compilation, not RocksDB)
+    // Print compiler info (applies only to Zig code compilation, not RocksDB)
     if (use_msvc_lib) {
         std.debug.print("Building with Zig clang compiler + pre-built MSVC RocksDB library\n", .{});
     } else if (use_msvc_compiler) {

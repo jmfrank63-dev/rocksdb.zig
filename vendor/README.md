@@ -38,6 +38,7 @@ Use the provided PowerShell script from the project root:
 ```
 
 This will:
+
 1. Configure RocksDB with CMake using Ninja generator
 2. Build the static library with optimal parallel compilation
 3. Place it in `build\rocksdb_Release\rocksdb.lib` or `build\rocksdb_Debug\rocksdb.lib`

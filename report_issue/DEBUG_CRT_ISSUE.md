@@ -4,7 +4,7 @@
 
 When building rocksdb-zig in **debug mode** with Zig's default clang compiler, the test `BackupEngine.restoreFromLatestBackup` fails with:
 
-```
+```text
 Assertion failed: GetRefcount(h.meta.LoadRelaxed()) == 0, 
   file C:\...\clock_cache.cc, line 2086
 ```
@@ -13,7 +13,7 @@ This occurs in RocksDB's clock cache destructor when reference counting fails.
 
 ## Root Cause
 
-**CRT (C Runtime) Mismatch**: 
+**CRT (C Runtime) Mismatch**:
 
 1. Zig's clang compiler auto-selects the **Release CRT** (libucrt.lib) even for debug builds
 2. RocksDB is built from source with debug flags by the build system
@@ -24,7 +24,9 @@ This occurs in RocksDB's clock cache destructor when reference counting fails.
 ## Solutions
 
 ### Option 1: Use Pre-built MSVC Library (Requires MSVC ABI)
+
 Build with the MSVC pre-built library:
+
 ```bash
 zig build test -Dtarget=native-windows-msvc -Duse_msvc_lib
 ```
@@ -32,6 +34,7 @@ zig build test -Dtarget=native-windows-msvc -Duse_msvc_lib
 This links against a properly matched MSVC Release library, bypassing the CRT issue.
 
 ### Option 2: Use Release Build
+
 ```bash
 zig build test --release=fast
 ```
@@ -39,6 +42,7 @@ zig build test --release=fast
 When building in Release mode, the CRT mismatch is less problematic.
 
 ### Option 3: Use MSVC Compiler (Future)
+
 Build with MSVC compiler instead of clang (requires additional configuration in build.zig).
 
 ## Current Workaround

@@ -4,6 +4,7 @@
 
 # Build directories
 /build/
+/zig-pkg/
 
 # Test artifacts
 /test_cpp/build_*/
