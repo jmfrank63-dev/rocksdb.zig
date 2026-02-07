@@ -69,7 +69,7 @@ pub fn build(b: *Build) !void {
         const rocksdb_config = "Release";
         const vendor_lib_path = b.fmt("build/rocksdb_{s}/rocksdb.lib", .{rocksdb_config});
 
-        // Always create build step if use_msvc_compiler is set, 
+        // Always create build step if use_msvc_compiler is set,
         // or if the library doesn't exist yet.
         const lib_exists = blk: {
             std.fs.cwd().access(vendor_lib_path, .{}) catch break :blk false;
@@ -169,7 +169,7 @@ fn addRocksDB(
     // Print compiler info
     if (use_msvc_compiler) {
         std.debug.print("Building with MSVC compiler (via scripts/build_rocksdb.ps1)\n", .{});
-    } else if (effective_use_msvc_lib) {
+    } else if (use_msvc_lib) {
         std.debug.print("Building with Zig clang compiler + pre-built MSVC RocksDB library\n", .{});
     } else {
         std.debug.print("Building with Zig clang compiler (default)\n", .{});
