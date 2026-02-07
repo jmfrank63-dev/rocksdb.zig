@@ -782,7 +782,8 @@ fn buildRocksDB(
             .PROJECT_VERSION_MAJOR = 1,
             .PROJECT_VERSION_MINOR = 2,
             .PROJECT_VERSION_PATCH = 2,
-            .HAVE_SYS_UIO_H_01 = 1,
+            // sys/uio.h only exists on POSIX systems, not Windows
+            .HAVE_SYS_UIO_H_01 = if (t.os.tag == .windows) 0 else 1,
         });
 
         libsnappy.addIncludePath(build_version.getOutput().dirname());
