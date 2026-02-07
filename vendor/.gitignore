@@ -1,0 +1,3 @@
+# Build artifacts
+build_rocksdb_*/
+!README.md

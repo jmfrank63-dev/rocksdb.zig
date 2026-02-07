@@ -1,0 +1,15 @@
+# Build artifacts from test reproduction
+*.obj
+*.lib
+*.exe
+*.pdb
+*.ilk
+
+# Zig cache
+.zig-cache/
+zig-out/
+
+# Test outputs
+test_db_*/
+test_backup_*/
+test_restore_*/

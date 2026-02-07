@@ -16,11 +16,95 @@ pub fn build(b: *Build) !void {
     const use_msvc_lib = b.option(
         bool,
         "use_msvc_lib",
-        "Use pre-built MSVC library from test_cpp/build_rocksdb/Release (requires -Dtarget=native-windows-msvc)",
+        "Use pre-built MSVC library from vendor/ (requires -Dtarget=native-windows-msvc)",
     ) orelse false;
 
+    // When targeting MSVC ABI, use pre-built MSVC library by default
+    // because Zig's clang has conflicts between libc++ and MSVC STL headers
+    const effective_use_msvc_lib = use_msvc_lib or target.result.abi == .msvc;
+
+    const use_msvc_compiler = b.option(
+        bool,
+        "use_msvc_compiler",
+        "Use MSVC compiler instead of clang (Windows MSVC ABI only). Default: false (uses clang)",
+    ) orelse false;
+
+    const enable_c_api_static = b.option(
+        bool,
+        "enable_c_api_static",
+        "Build a C-API-only static library (no C++ API)",
+    ) orelse false;
+
+    const enable_c_api_shared = b.option(
+        bool,
+        "enable_c_api_shared",
+        "Build a C-API-only shared library (avoids Windows export limit)",
+    ) orelse false;
+
+    // Add build steps for RocksDB MSVC library (define early so we can reference them)
+    var rocksdb_build_step: ?*Build.Step = null;
+    if (target.result.os.tag == .windows and effective_use_msvc_lib) {
+        // First, check if vendor/rocksdb exists
+        const vendor_rocksdb_exists = blk: {
+            std.fs.cwd().access("vendor/rocksdb", .{}) catch break :blk false;
+            break :blk true;
+        };
+
+        if (!vendor_rocksdb_exists) {
+            std.debug.print("\n" ++ "=" ** 70 ++ "\n", .{});
+            std.debug.print("ERROR: vendor/rocksdb not found\n", .{});
+            std.debug.print("=" ** 70 ++ "\n\n", .{});
+            std.debug.print("RocksDB submodule is not initialized.\n\n", .{});
+            std.debug.print("SOLUTION: Initialize the submodule:\n\n", .{});
+            std.debug.print("    git submodule update --init --recursive\n\n", .{});
+            std.debug.print("Or clone RocksDB manually:\n\n", .{});
+            std.debug.print("    git clone --depth 1 --branch v10.9.1 https://github.com/facebook/rocksdb.git vendor/rocksdb\n\n", .{});
+            std.debug.print("=" ** 70 ++ "\n", .{});
+            return error.RocksDBSubmoduleNotInitialized;
+        }
+
+        // Check if we need to build RocksDB
+        // Always use Release config for RocksDB library to avoid debug CRT symbol issues
+        // (Zig's libc doesn't provide _malloc_dbg, _free_dbg, etc.)
+        const rocksdb_config = "Release";
+        const vendor_lib_path = b.fmt("build/rocksdb_{s}/rocksdb.lib", .{rocksdb_config});
+
+        // Only create build step if library doesn't exist
+        const lib_exists = blk: {
+            std.fs.cwd().access(vendor_lib_path, .{}) catch break :blk false;
+            break :blk true;
+        };
+
+        if (!lib_exists) {
+            std.debug.print("RocksDB MSVC library not found, will build automatically...\n", .{});
+            const build_rocksdb_cmd = b.addSystemCommand(&[_][]const u8{
+                "powershell.exe",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "scripts/build_rocksdb.ps1",
+                "-BuildType",
+                "Release",
+            });
+            rocksdb_build_step = &build_rocksdb_cmd.step;
+        }
+
+        // Also create manual build steps
+        const build_rocksdb_release = b.step("rocksdb-msvc-release", "Build RocksDB Release library with MSVC");
+        const build_rocksdb_release_cmd = b.addSystemCommand(&[_][]const u8{
+            "powershell.exe",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "scripts/build_rocksdb.ps1",
+            "-BuildType",
+            "Release",
+        });
+        build_rocksdb_release.dependOn(&build_rocksdb_release_cmd.step);
+    }
+
     // RocksDB's translate-c module
-    const rocksdb_mod = try addRocksDB(b, target, optimize, enable_snappy, use_msvc_lib);
+    const rocksdb_mod = try addRocksDB(b, target, optimize, enable_snappy, enable_c_api_static, enable_c_api_shared, effective_use_msvc_lib, use_msvc_compiler, rocksdb_build_step);
     const bindings_mod = b.addModule("bindings", .{
         .target = target,
         .optimize = optimize,
@@ -28,7 +112,7 @@ pub fn build(b: *Build) !void {
     });
     bindings_mod.addImport("rocksdb", rocksdb_mod);
 
-    const test_optimize = if (use_msvc_lib) optimize else optimize; // Use same optimize mode
+    const test_optimize = if (effective_use_msvc_lib) optimize else optimize; // Use same optimize mode
 
     const bindings_mod_for_test = b.addModule("bindings", .{
         .target = target,
@@ -40,26 +124,77 @@ pub fn build(b: *Build) !void {
     const tests = b.addTest(.{
         .root_module = bindings_mod_for_test,
     });
+
     const test_step = b.step("test", "Run bindings tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 }
 
 /// Create a zig module for the bare C++ library by exposing its C api.
 /// Builds rocksdb, links it, and translates its headers.
+///
+/// COMPILER SELECTION:
+/// - Default: Zig's clang compiler (LLVM-based)
+/// - Option: MSVC compiler via -Duse_msvc_compiler (Windows MSVC ABI only)
+///
+/// KNOWN ISSUES:
+/// - Debug builds with clang may fail due to CRT mismatch with RocksDB source
+/// - Use Release mode or -Duse_msvc_lib to work around this issue
 fn addRocksDB(
     b: *Build,
     target: ResolvedTarget,
     optimize: OptimizeMode,
     enable_snappy: bool,
+    enable_c_api_static: bool,
+    enable_c_api_shared: bool,
     use_msvc_lib: bool,
+    use_msvc_compiler: bool,
+    maybe_rocksdb_build_step: ?*Build.Step,
 ) !*Build.Module {
-    const rocks_dep = b.dependency("rocksdb", .{});
+    // Validate MSVC compiler option first
+    if (use_msvc_compiler) {
+        if (target.result.os.tag != .windows or target.result.abi != .msvc) {
+            std.debug.print("ERROR: -Duse_msvc_compiler requires -Dtarget=native-windows-msvc\n", .{});
+            return error.InvalidTarget;
+        }
+    }
+
+    // Note: MSVC ABI builds may fail if MSVC headers are not available.
+    // In that case, use -Duse_msvc_lib=true or the default target.
+
+    // Now print the compiler being used
+    if (use_msvc_compiler) {
+        std.debug.print("Building with MSVC compiler\n", .{});
+    } else if (use_msvc_lib) {
+        std.debug.print("Building with Zig clang compiler + pre-built MSVC RocksDB library\n", .{});
+    } else {
+        std.debug.print("Building with Zig clang compiler (default)\n", .{});
+    }
+
+    // Check if vendor/rocksdb exists for MSVC builds
+    const use_vendor_rocksdb = blk: {
+        std.fs.cwd().access("vendor/rocksdb", .{}) catch break :blk false;
+        break :blk target.result.abi == .msvc;
+    };
+
+    // Determine source for RocksDB: vendor directory or Zig dependency
+    const rocks_path_base = if (use_vendor_rocksdb)
+        b.path("vendor/rocksdb")
+    else
+        b.dependency("rocksdb", .{}).path("");
 
     const translate_c = b.addTranslateC(.{
-        .root_source_file = rocks_dep.path("include/rocksdb/c.h"),
+        .root_source_file = if (use_vendor_rocksdb)
+            b.path("vendor/rocksdb/include/rocksdb/c.h")
+        else
+            b.dependency("rocksdb", .{}).path("include/rocksdb/c.h"),
         .target = target,
         .optimize = optimize,
     });
+
+    // If we need to build RocksDB first, make translate_c depend on it
+    if (maybe_rocksdb_build_step) |build_step| {
+        translate_c.step.dependOn(build_step);
+    }
 
     // Use pre-built MSVC library when targeting MSVC ABI
     if (use_msvc_lib) {
@@ -68,9 +203,51 @@ fn addRocksDB(
             return error.InvalidTarget;
         }
 
-        std.debug.print("Using pre-built MSVC RocksDB library from test_cpp/build_rocksdb/Release\n", .{});
+        // Try building from vendor/rocksdb first if it exists
+        const lib_path = if (use_vendor_rocksdb) blk: {
+            std.debug.print("Using MSVC-built RocksDB from vendor/...\n", .{});
 
-        // Create module WITHOUT libc++ (MSVC uses its own C++ stdlib)
+            // Try to find the pre-built library
+            // Always use Release build to avoid debug CRT symbol linking issues
+            const vendor_lib_path = b.fmt("build/rocksdb_Release/rocksdb.lib", .{});
+
+            // If we have a build step, the library will be built, so proceed
+            if (maybe_rocksdb_build_step != null) {
+                std.debug.print("Library will be built automatically...\n", .{});
+                break :blk vendor_lib_path;
+            }
+
+            // Otherwise check if it exists
+            const lib_file = std.fs.cwd().openFile(vendor_lib_path, .{}) catch {
+                std.debug.print("\n" ++ "=" ** 70 ++ "\n", .{});
+                std.debug.print("ERROR: MSVC RocksDB library not found\n", .{});
+                std.debug.print("=" ** 70 ++ "\n\n", .{});
+                std.debug.print("Expected location: {s}\n\n", .{vendor_lib_path});
+                std.debug.print("NOTE: The build system should have built this automatically.\n", .{});
+                std.debug.print("      If you see this error, try building manually:\n\n", .{});
+                std.debug.print("    .\\scripts\\build_rocksdb.ps1 -BuildType Release\n\n", .{});
+                std.debug.print("=" ** 70 ++ "\n", .{});
+                return error.LibraryNotFound;
+            };
+            lib_file.close();
+
+            break :blk vendor_lib_path;
+        } else blk: {
+            // Fall back to build/rocksdb_Release (always use Release to avoid debug CRT symbols)
+            const release_path = "build/rocksdb_Release/rocksdb.lib";
+            // Check if Release library exists
+            const release_file = std.fs.cwd().openFile(release_path, .{}) catch {
+                std.debug.print("ERROR: No MSVC RocksDB library found.\n", .{});
+                std.debug.print("       Clone RocksDB: git clone --depth=1 -b v10.9.1 https://github.com/facebook/rocksdb vendor/rocksdb\n", .{});
+                std.debug.print("       Then build: .\\scripts\\build_rocksdb.ps1 -BuildType Release\n", .{});
+                return error.LibraryNotFound;
+            };
+            release_file.close();
+            std.debug.print("Using pre-built MSVC RocksDB library from build/rocksdb_Release\n", .{});
+            break :blk release_path;
+        };
+
+        // Create module with libc but WITHOUT libc++ (MSVC uses its own C++ stdlib)
         const mod = b.addModule("rocksdb", .{
             .root_source_file = translate_c.getOutput(),
             .target = target,
@@ -79,35 +256,35 @@ fn addRocksDB(
             // Do NOT link libc++ - MSVC has its own C++ standard library
         });
 
-        // Link the MSVC-built RELEASE static library
-        mod.addObjectFile(b.path("test_cpp/build_rocksdb/Release/rocksdb.lib"));
+        // Link the MSVC-built library
+        mod.addObjectFile(b.path(lib_path));
 
-        // Add include paths for headers
-        mod.addIncludePath(rocks_dep.path("include"));
+        // Add Windows system libraries that MSVC builds expect
+        if (target.result.os.tag == .windows) {
+            mod.linkSystemLibrary("shlwapi", .{});
+            mod.linkSystemLibrary("rpcrt4", .{});
+            // Note: Not linking MSVC CRT explicitly to avoid conflicts with Zig's libc
+            // This means Debug builds with MSVC library have CRT mismatch issues
+
+            mod.addIncludePath(b.path("vendor/rocksdb/include"));
+        } else {
+            mod.addIncludePath(b.dependency("rocksdb", .{}).path("include"));
+        }
 
         return mod;
     }
 
-    // Default path: build from source with libc++
+    // Default path: build from source with libc++ (unless targeting MSVC)
+    // MSVC has its own C++ standard library, so we don't link libc++
     const mod = b.addModule("rocksdb", .{
         .root_source_file = translate_c.getOutput(),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .link_libcpp = true,
+        .link_libcpp = target.result.abi != .msvc, // Only link libc++ on non-MSVC targets
     });
 
     const force_pic = b.option(bool, "force_pic", "Forces PIC enabled for the libraries");
-    const enable_c_api_static = b.option(
-        bool,
-        "enable_c_api_static",
-        "Build a C-API-only static library (no C++ API)",
-    ) orelse false;
-    const enable_c_api_shared = b.option(
-        bool,
-        "enable_c_api_shared",
-        "Build a C-API-only shared library (avoids Windows export limit)",
-    ) orelse false;
 
     const static_rocksdb = b.addLibrary(.{
         .name = if (enable_c_api_static) "rocksdb_c_api" else "rocksdb",
@@ -157,7 +334,7 @@ fn addRocksDB(
         static_rocksdb.root_module.addCMacro("ROCKSDB_LIBRARY_EXPORTS", "");
     }
 
-    try buildRocksDB(b, static_rocksdb, maybe_libsnappy, target, enable_c_api_static);
+    try buildRocksDB(b, static_rocksdb, maybe_libsnappy, target, enable_c_api_static, rocks_path_base);
     if (dynamic_rocksdb) |dyn| {
         const dyn_is_c_api_only = enable_c_api_shared or target.result.os.tag == .windows;
         if (dyn_is_c_api_only) {
@@ -166,10 +343,10 @@ fn addRocksDB(
             dyn.root_module.addCMacro("ROCKSDB_DLL", "");
             dyn.root_module.addCMacro("ROCKSDB_LIBRARY_EXPORTS", "");
         }
-        try buildRocksDB(b, dyn, maybe_libsnappy, target, dyn_is_c_api_only);
+        try buildRocksDB(b, dyn, maybe_libsnappy, target, dyn_is_c_api_only, rocks_path_base);
     }
 
-    mod.addIncludePath(rocks_dep.path("include"));
+    mod.addIncludePath(rocks_path_base.path(b, "include"));
     mod.linkLibrary(static_rocksdb);
 
     // If snappy is enabled, ensure it's also linked to the module
@@ -188,12 +365,15 @@ fn buildRocksDB(
     maybe_libsnappy: ?*std.Build.Step.Compile,
     target: std.Build.ResolvedTarget,
     c_api_only: bool,
+    rocks_path: Build.LazyPath,
 ) !void {
     const t = target.result;
-    const rocks_dep = b.dependency("rocksdb", .{});
 
     librocksdb.linkLibC();
-    librocksdb.linkLibCpp();
+    // Only link libc++ on non-MSVC targets; MSVC has its own C++ stdlib
+    if (t.abi != .msvc) {
+        librocksdb.linkLibCpp();
+    }
 
     var rocksdb_flags: std.ArrayListUnmanaged([]const u8) = .empty;
     defer rocksdb_flags.deinit(b.allocator);
@@ -205,10 +385,10 @@ fn buildRocksDB(
     });
     if (maybe_libsnappy != null) try rocksdb_flags.append(b.allocator, "-DSNAPPY=1");
 
-    librocksdb.addIncludePath(rocks_dep.path("include"));
-    librocksdb.addIncludePath(rocks_dep.path("."));
+    librocksdb.addIncludePath(rocks_path.path(b, "include"));
+    librocksdb.addIncludePath(rocks_path.path(b, "."));
     librocksdb.addCSourceFiles(.{
-        .root = rocks_dep.path("."),
+        .root = rocks_path.path(b, "."),
         .files = &.{
             "cache/cache.cc",
             "cache/cache_entry_roles.cc",
@@ -550,7 +730,7 @@ fn buildRocksDB(
     // from missing stress test symbols (DbStressCustomCompressionManager)
     if (!c_api_only) {
         librocksdb.addCSourceFiles(.{
-            .root = rocks_dep.path("."),
+            .root = rocks_path.path(b, "."),
             .files = &.{
                 "tools/block_cache_analyzer/block_cache_trace_analyzer.cc",
                 "tools/dump/db_dump_tool.cc",
@@ -607,7 +787,7 @@ fn buildRocksDB(
     // platform dependent stuff
     if (t.cpu.arch == .aarch64) {
         librocksdb.addCSourceFile(.{
-            .file = rocks_dep.path("util/crc32c_arm64.cc"),
+            .file = rocks_path.path(b, "util/crc32c_arm64.cc"),
             .flags = rocksdb_flags.items,
         });
     }
@@ -616,7 +796,7 @@ fn buildRocksDB(
         librocksdb.root_module.addCMacro("ROCKSDB_PLATFORM_POSIX", "");
         librocksdb.root_module.addCMacro("ROCKSDB_LIB_IO_POSIX", "");
         librocksdb.addCSourceFiles(.{
-            .root = rocks_dep.path("."),
+            .root = rocks_path.path(b, "."),
             .files = &.{
                 "port/port_posix.cc",
                 "env/env_posix.cc",
@@ -633,7 +813,7 @@ fn buildRocksDB(
         librocksdb.root_module.addCMacro("NOMINMAX", "");
         librocksdb.root_module.addCMacro("_WINDOWS", "");
         librocksdb.addCSourceFiles(.{
-            .root = rocks_dep.path("."),
+            .root = rocks_path.path(b, "."),
             .files = &.{
                 "port/win/env_win.cc",
                 "port/win/env_default.cc",
@@ -659,7 +839,7 @@ fn buildRocksDB(
     }
 
     const build_version = b.addConfigHeader(.{
-        .style = .{ .cmake = rocks_dep.path("util/build_version.cc.in") },
+        .style = .{ .cmake = rocks_path.path(b, "util/build_version.cc.in") },
         .include_path = "util/build_version.cc",
     }, .{
         .GIT_MOD = 1,

@@ -1,6 +1,16 @@
 /.zig-cache
 /zig-out
-/test-state
 /.vscode
-/test_cpp
-/report_issue
+
+# Build directories
+/build/
+
+# Test artifacts
+/test_cpp/build_*/
+/test_cpp/*.exe
+/test_cpp/*.ilk
+/test_cpp/*.pdb
+
+# Report issue build artifacts  
+/report_issue/zig-cache/
+/report_issue/zig-out/

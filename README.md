@@ -11,7 +11,38 @@ This project was originally forked from [Syndica/rocksdb-zig](https://github.com
 - **Original work**: Copyright © Syndica (Apache 2.0 License)
 - **Substantial modifications and additions**: Copyright © 2024-2026 Johannes Maria Frank <jmfrank63@gmail.com>
 
-This fork represents a near-complete rewrite with ~97% new code, including comprehensive DBOptions, backup/recovery systems, transactions, merge operators, and a 114-test suite. See [NOTICE](NOTICE) for detailed attribution.
+### Major Enhancements
+
+This fork represents a near-complete rewrite (~97% new code) with comprehensive additions:
+
+**Core Systems**
+- Complete DBOptions system (30+ options: compression, bloom filters, compaction, caching)
+- ReadOptions & WriteOptions with full configuration support
+- Snapshot support with proper lifetime management
+
+**Advanced Features**
+- Backup & Recovery system (BackupEngine, Checkpoint, incremental backups, restore operations)
+- Transaction support (OptimisticTransactionDB and TransactionDB with isolation levels)
+- Merge Operators (built-in: StringAppend, UInt64Add, Max + custom callback support)
+- Enhanced Iterator API with forward/reverse iteration and seek operations
+
+**Quality & Testing**
+- 114 comprehensive tests covering all features
+- Memory leak detection and error propagation verification
+- Cross-platform testing (Windows MSVC, Linux, macOS)
+- Production-ready with RocksDB v10.9.1
+
+**Infrastructure**
+- Zig 0.15.2 build system support
+- MSVC-specific optimizations and C-API-only build variants
+- Improved Windows DLL handling and Snappy compression support
+- Comprehensive documentation (ROADMAP.md, migration guides, debugging notes)
+
+### Dependencies
+
+This project links against:
+- **RocksDB v10.9.1** - Licensed under Apache 2.0 or GPLv2, Copyright © Facebook, Inc.
+- Additional dependencies documented in `build.zig.zon`
 
 ## Features
 
@@ -50,9 +81,60 @@ in `zig-out/lib/librocksdb.a`.
 
 You can use this with any language or build system.
 
-### Build variants and flags
+### Windows MSVC Build
 
-#### Default build (full C++ API, static)
+On Windows with MSVC, use the PowerShell build script to compile RocksDB with the Ninja generator for optimal parallel compilation:
+
+```powershell
+# Requires: Ninja, CMake, Visual Studio 2022 with C++ tools, Zig 0.15.2
+# Build RocksDB Release library
+.\scripts\build_rocksdb.ps1 Release
+
+# Then build Zig project with pre-built library
+zig build -Dtarget=native-windows-msvc
+```
+
+The script automatically:
+- Detects Visual Studio installation
+- Sets up MSVC environment
+- Builds with Ninja for true parallel compilation
+- Uses static CRT (/MT) to avoid linker warnings
+- Enables RTTI for RocksDB compatibility
+- Produces `build\rocksdb_Release\rocksdb.lib`
+
+#### Windows MSVC Build Variants
+
+All Windows MSVC builds use the pre-built Release RocksDB library:
+
+```powershell
+# Default: Build with full C++ API
+zig build -Dtarget=native-windows-msvc
+
+# C-API-only static library
+zig build -Dtarget=native-windows-msvc -Denable_c_api_static
+
+# C-API-only DLL (avoids 65535 symbol export limit)
+zig build -Dtarget=native-windows-msvc -Denable_c_api_shared
+
+# Release mode (recommended for testing)
+zig build test -Dtarget=native-windows-msvc --release=fast
+
+# Debug mode (115 of 116 tests pass; see ROADMAP.md for details)
+zig build test -Dtarget=native-windows-msvc
+
+# With Snappy compression
+zig build -Dtarget=native-windows-msvc -Denable_snappy
+```
+
+### Non-Windows Build
+
+Default build produces both static and shared libraries:
+
+```bash
+zig build
+```
+
+### Additional Build Variants (Cross-Platform)
 
 ```bash
 zig build
@@ -148,7 +230,6 @@ zig build test
 ## Documentation
 
 - [ROADMAP.md](ROADMAP.md) - Complete feature list, implementation status, and future plans
-- [NOTICE](NOTICE) - Detailed attribution and modification history
 - [report_issue/](report_issue/) - Known issues and workarounds for Zig toolchain
 
 ## License
@@ -175,7 +256,3 @@ When contributing, please:
 2. Add tests for new features
 3. Update ROADMAP.md for major additions
 4. Follow existing code style and patterns
-
----
-
-**Note**: If migrating from Syndica/rocksdb-zig, this is a hard fork with substantial breaking changes. Review the [NOTICE](NOTICE) file for a complete list of modifications.

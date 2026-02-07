@@ -13,7 +13,7 @@ Write-Host ""
 
 # Paths
 $rocksdbSource = "$env:USERPROFILE\AppData\Local\zig\p\N-V-__8AAEv0kgK0ypKHX8K7uy2ja2yMJb-o6B8pmW-B0ur5"
-$rocksdbBuildDir = "build_rocksdb"
+$rocksdbBuildDir = "../build/rocksdb_native"
 $testBuildDir = "build_native_$($BuildType.ToLower())"
 
 if (-not (Test-Path $rocksdbSource)) {
