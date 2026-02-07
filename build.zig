@@ -25,10 +25,9 @@ pub fn build(b: *Build) !void {
         "Use MSVC compiler instead of clang (Windows MSVC ABI only). Default: false (uses clang)",
     ) orelse false;
 
-    // When targeting MSVC ABI, use pre-built MSVC library by default
+    // When targeting MSVC ABI, use MSVC-built RocksDB library by default
     // because Zig's clang has conflicts between libc++ and MSVC STL headers.
-    // However, if the user explicitly asks for the MSVC compiler, we build from source.
-    const effective_use_msvc_lib = use_msvc_lib or (target.result.abi == .msvc and !use_msvc_compiler);
+    const effective_use_msvc_lib = use_msvc_lib or target.result.abi == .msvc or use_msvc_compiler;
 
     const enable_c_api_static = b.option(
         bool,
@@ -70,14 +69,19 @@ pub fn build(b: *Build) !void {
         const rocksdb_config = "Release";
         const vendor_lib_path = b.fmt("build/rocksdb_{s}/rocksdb.lib", .{rocksdb_config});
 
-        // Only create build step if library doesn't exist
+        // Always create build step if use_msvc_compiler is set, 
+        // or if the library doesn't exist yet.
         const lib_exists = blk: {
             std.fs.cwd().access(vendor_lib_path, .{}) catch break :blk false;
             break :blk true;
         };
 
-        if (!lib_exists) {
-            std.debug.print("RocksDB MSVC library not found, will build automatically...\n", .{});
+        if (use_msvc_compiler or !lib_exists) {
+            if (use_msvc_compiler) {
+                std.debug.print("Forcing RocksDB build with MSVC compiler...\n", .{});
+            } else {
+                std.debug.print("RocksDB MSVC library not found, will build automatically...\n", .{});
+            }
             const build_rocksdb_cmd = b.addSystemCommand(&[_][]const u8{
                 "powershell.exe",
                 "-ExecutionPolicy",
@@ -162,11 +166,11 @@ fn addRocksDB(
     // Note: MSVC ABI builds may fail if MSVC headers are not available.
     // In that case, use -Duse_msvc_lib=true or the default target.
 
-    // Print compiler info (applies only to Zig code compilation, not RocksDB)
-    if (use_msvc_lib) {
+    // Print compiler info
+    if (use_msvc_compiler) {
+        std.debug.print("Building with MSVC compiler (via scripts/build_rocksdb.ps1)\n", .{});
+    } else if (effective_use_msvc_lib) {
         std.debug.print("Building with Zig clang compiler + pre-built MSVC RocksDB library\n", .{});
-    } else if (use_msvc_compiler) {
-        std.debug.print("Building with MSVC compiler (Zig code only; RocksDB built from source)\n", .{});
     } else {
         std.debug.print("Building with Zig clang compiler (default)\n", .{});
     }
