@@ -143,7 +143,7 @@ if (Test-Path $libPath) {
     $libSize = (Get-Item $libPath).Length / 1MB
     $relativePath = "build\rocksdb_$ConfigType\rocksdb.lib"
     Write-Host ""
-    Write-Host "=== ✅ SUCCESS ===" -ForegroundColor Green
+    Write-Host "=== SUCCESS ===" -ForegroundColor Green
     Write-Host ""
     Write-Host "RocksDB library built successfully!" -ForegroundColor Green
     Write-Host "  Location: $relativePath" -ForegroundColor Cyan

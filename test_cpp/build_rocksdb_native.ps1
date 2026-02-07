@@ -64,7 +64,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Set-Location ..
-Write-Host "  ✓ RocksDB built successfully" -ForegroundColor Green
+Write-Host "  [OK] RocksDB built successfully" -ForegroundColor Green
 
 # Step 2: Build our C test
 Write-Host "`nStep 2: Building C API test ($BuildType mode)..." -ForegroundColor Cyan
@@ -98,7 +98,7 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-Write-Host "  ✓ Test built successfully" -ForegroundColor Green
+Write-Host "  [OK] Test built successfully" -ForegroundColor Green
 
 # Step 3: Run the test
 Write-Host "`nStep 3: Running test..." -ForegroundColor Cyan

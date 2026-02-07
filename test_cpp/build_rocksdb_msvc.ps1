@@ -65,12 +65,12 @@ Set-Location ..
 $libPath = "$buildDir/$Config/rocksdb.lib"
 if (Test-Path $libPath) {
     Write-Host ""
-    Write-Host "✅ SUCCESS!" -ForegroundColor Green
+    Write-Host "[OK] SUCCESS!" -ForegroundColor Green
     Write-Host "RocksDB library built at: $libPath" -ForegroundColor Green
     Write-Host ""
     Write-Host "You can now build with: zig build -Dtarget=native-windows-msvc" -ForegroundColor Cyan
 } else {
     Write-Host ""
-    Write-Host "❌ ERROR: Library not found at expected path: $libPath" -ForegroundColor Red
+    Write-Host "[ERROR] ERROR: Library not found at expected path: $libPath" -ForegroundColor Red
     exit 1
 }

@@ -15,24 +15,28 @@ This project was originally forked from [Syndica/rocksdb-zig](https://github.com
 
 This fork represents a near-complete rewrite (~97% new code) with comprehensive additions:
 
-**Core Systems**
+#### Core Systems
+
 - Complete DBOptions system (30+ options: compression, bloom filters, compaction, caching)
 - ReadOptions & WriteOptions with full configuration support
 - Snapshot support with proper lifetime management
 
-**Advanced Features**
+#### Advanced Features
+
 - Backup & Recovery system (BackupEngine, Checkpoint, incremental backups, restore operations)
 - Transaction support (OptimisticTransactionDB and TransactionDB with isolation levels)
 - Merge Operators (built-in: StringAppend, UInt64Add, Max + custom callback support)
 - Enhanced Iterator API with forward/reverse iteration and seek operations
 
-**Quality & Testing**
+#### Quality & Testing
+
 - 116 comprehensive tests covering all features
 - Memory leak detection and error propagation verification
 - Cross-platform testing (Windows MSVC, Linux, macOS)
 - Production-ready with RocksDB v10.9.1
 
-**Infrastructure**
+#### Infrastructure
+
 - Zig 0.15.2 build system support
 - MSVC-specific optimizations and C-API-only build variants
 - Improved Windows DLL handling and Snappy compression support
@@ -41,6 +45,7 @@ This fork represents a near-complete rewrite (~97% new code) with comprehensive 
 ### Dependencies
 
 This project links against:
+
 - **RocksDB v10.9.1** - Licensed under Apache 2.0 or GPLv2, Copyright © Facebook, Inc.
 - Additional dependencies documented in `build.zig.zon`
 
@@ -95,6 +100,7 @@ zig build -Dtarget=native-windows-msvc
 ```
 
 The script automatically:
+
 - Detects Visual Studio installation
 - Sets up MSVC environment
 - Builds with Ninja for true parallel compilation
